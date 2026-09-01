@@ -3,7 +3,7 @@ Pydantic models -- the API's request/response contract.
 """
 from datetime import date
 from decimal import Decimal
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -40,6 +40,46 @@ class NormalizationMappingOut(BaseModel):
     canonical_value: str
     account_id: Optional[int]
     merchant: Optional[str] = None
+
+
+MappingKind = Literal["transaction_type", "category", "owner", "merchant"]
+
+
+class ProposedMappingIn(BaseModel):
+    kind: MappingKind
+    raw_value: str
+    canonical_value: str
+    account_id: Optional[int] = None
+    merchant: Optional[str] = None  # only valid when kind == "category"
+
+
+class SampleChange(BaseModel):
+    transaction_id: int
+    description: str
+    field: MappingKind
+    current_effective: Optional[str]
+    new_effective: Optional[str]
+
+
+class RuleImpact(BaseModel):
+    rule: ProposedMappingIn
+    would_change: int
+    suppressed_by_override: int
+    shadowed_by_existing: int
+    duplicate_of_existing_id: Optional[int]
+    samples: list[SampleChange]
+
+
+class MappingPreview(BaseModel):
+    scanned: int
+    total_would_change: int
+    rules: list[RuleImpact]
+    validation_errors: list[str]
+
+
+class MappingPreviewIn(BaseModel):
+    rules: list[ProposedMappingIn]
+    account_id: Optional[int] = None
 
 
 # ---- Accounts ----
