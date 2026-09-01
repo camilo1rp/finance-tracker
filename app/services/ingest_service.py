@@ -143,16 +143,11 @@ def ingest_from_source(
     )
 
 
-def reclassify_transactions(
+def run_reclassification(
     db: Session,
     account_id: int | None = None,
 ) -> ReclassifyResult:
-    """
-    Re-apply current normalization mappings to stored transactions.
-    Does not re-import: raw columns stay put. category_override is left alone.
-    Type is only recalculated when raw_type is present (sign-derived rows stay).
-    Owner is only recalculated when owner_raw is present (account default stays).
-    """
+    """Reclassify stored rows without committing. Caller owns the transaction."""
     if account_id is not None and db.get(Account, account_id) is None:
         raise AccountNotFoundError(f"account {account_id} not found")
 
@@ -228,7 +223,6 @@ def reclassify_transactions(
         if changed:
             updated += 1
 
-    db.commit()
     return ReclassifyResult(
         scanned=len(rows),
         updated=updated,
@@ -239,6 +233,21 @@ def reclassify_transactions(
             merchants=sorted(unmapped_merchants),
         ),
     )
+
+
+def reclassify_transactions(
+    db: Session,
+    account_id: int | None = None,
+) -> ReclassifyResult:
+    """
+    Re-apply current normalization mappings to stored transactions.
+    Does not re-import: raw columns stay put. category_override is left alone.
+    Type is only recalculated when raw_type is present (sign-derived rows stay).
+    Owner is only recalculated when owner_raw is present (account default stays).
+    """
+    result = run_reclassification(db, account_id=account_id)
+    db.commit()
+    return result
 
 
 def _backfill_merchant_raw(txn: Transaction, account: Account | None) -> str | None:

@@ -1,8 +1,9 @@
 """
-Preview (and later apply) of proposed normalization mappings.
+Preview and apply proposed normalization mappings.
 
 Preview is a pure read: it layers proposed rules over existing ones in memory
-and reports per-rule impact without writing or flushing.
+and reports per-rule impact without writing or flushing. Apply inserts the
+approved rules and reclassifies in a single transaction.
 """
 from dataclasses import dataclass, field
 
@@ -23,12 +24,16 @@ from app.domain.merged_lookup import MergedNormalizationLookup, RuleMatch, RuleS
 from app.domain.merchant import resolved_merchant
 from app.models import Account, NormalizationMapping, Owner, Transaction
 from app.schemas import (
+    ApplyMappingPlanIn,
+    ApplyResult,
     MappingPreview,
     ProposedMappingIn,
     RuleImpact,
     SampleChange,
+    UnmappedValuesOut,
 )
-from app.services.ingest_service import _backfill_merchant_raw
+from app.services.analytics_service import unmapped_summary
+from app.services.ingest_service import _backfill_merchant_raw, run_reclassification
 
 _SAMPLE_CAP = 5
 
@@ -387,3 +392,65 @@ def _field_delta(
     )
     new_eff = resolved_merchant(merchant_raw, new_merchant, txn.merchant_override)
     return stored_diff, suppressed, current_eff, new_eff
+
+
+class MappingPlanValidationError(ValueError):
+    def __init__(self, errors: list[str]) -> None:
+        self.errors = errors
+        super().__init__("; ".join(errors))
+
+
+def apply_mapping_plan(db: Session, plan: ApplyMappingPlanIn) -> ApplyResult:
+    """Insert approved rules and reclassify. Commits once; rolls back on failure."""
+    errors = [
+        err
+        for i, rule in enumerate(plan.rules)
+        if (err := validate_proposed_rule(db, rule, i + 1)) is not None
+    ]
+    if errors:
+        raise MappingPlanValidationError(errors)
+
+    created_mapping_ids: list[int] = []
+    skipped_duplicates: list[ProposedMappingIn] = []
+    pending: list[NormalizationMapping] = []
+    try:
+        for i, rule in enumerate(plan.rules):
+            spec = _rule_spec(rule, i)
+            existing = find_mapping_by_identity(
+                db, spec.kind, spec.raw_value, spec.account_id, spec.merchant
+            )
+            if existing is not None:
+                skipped_duplicates.append(rule)
+                continue
+            row = NormalizationMapping(
+                kind=spec.kind,
+                raw_value=spec.raw_value,
+                canonical_value=spec.canonical_value,
+                account_id=spec.account_id,
+                merchant=spec.merchant,
+            )
+            db.add(row)
+            pending.append(row)
+        db.flush()
+        created_mapping_ids = [row.id for row in pending]
+
+        reclass = run_reclassification(db, account_id=plan.account_id)
+        db.flush()
+        unmapped = unmapped_summary(db)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return ApplyResult(
+        created_mapping_ids=created_mapping_ids,
+        skipped_duplicates=skipped_duplicates,
+        reclass_scanned=reclass.scanned,
+        reclass_updated=reclass.updated,
+        unmapped_after=UnmappedValuesOut(
+            transaction_types=unmapped["transaction_types"],
+            categories=unmapped["categories"],
+            owners=unmapped["owners"],
+            merchants=unmapped["merchants"],
+        ),
+    )

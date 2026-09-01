@@ -82,6 +82,11 @@ class MappingPreviewIn(BaseModel):
     account_id: Optional[int] = None
 
 
+class ApplyMappingPlanIn(BaseModel):
+    rules: list[ProposedMappingIn]
+    account_id: Optional[int] = None
+
+
 # ---- Accounts ----
 
 class ImportMappingIn(BaseModel):
@@ -120,6 +125,14 @@ class UnmappedValuesOut(BaseModel):
     categories: list[str]
     owners: list[str]
     merchants: list[str] = []
+
+
+class ApplyResult(BaseModel):
+    created_mapping_ids: list[int]
+    skipped_duplicates: list[ProposedMappingIn]
+    reclass_scanned: int
+    reclass_updated: int
+    unmapped_after: UnmappedValuesOut
 
 
 class ImportResult(BaseModel):
