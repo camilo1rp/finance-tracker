@@ -1,0 +1,4 @@
+Transaction Date,Description,Amount,Type,Category
+2024-08-01,DUPLICATE ME,5.00,Sale,Shopping
+2024-08-01,DUPLICATE ME,5.00,Sale,Shopping
+2024-08-02,UNIQUE ROW,7.00,Sale,Shopping

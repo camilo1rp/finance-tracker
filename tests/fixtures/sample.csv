@@ -1,0 +1,5 @@
+Date,Description,Amount,Type,Category,Purchased By
+2024-03-01,Coffee Shop,4.50,Sale,Food & Drink,John
+2024-03-02,Refund,12.00,Return,Shopping,John
+2024-03-03,Payment,-100.00,Payment,,
+2024-03-04,Unknown Merchant,20.00,Sale,Mystery,Jane

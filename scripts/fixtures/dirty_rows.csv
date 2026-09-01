@@ -1,0 +1,5 @@
+Transaction Date,Description,Amount,Type,Category
+2024-07-01,GOOD ROW,10.00,Sale,Shopping
+not-a-date,BAD DATE,10.00,Sale,Food & Drink
+2024-07-02,MISSING AMOUNT,,Sale,Food & Drink
+2024-07-03,UNKNOWN STUFF,10.00,Fee,Mystery Category

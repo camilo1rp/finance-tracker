@@ -1,0 +1,5 @@
+Transaction Date,Description,Amount,Type,Category
+2024-06-01,STARBUCKS STORE 123,12.45," Sale ",Food & Drink
+2024-06-02,AMAZON MARKETPLACE,45.00,Sale,Shopping
+2024-06-03,AMAZON MARKETPLACE,-45.00,Return,Shopping
+2024-06-05,Payment Thank You,-200.00,Payment,
