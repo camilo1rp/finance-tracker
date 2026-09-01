@@ -5,7 +5,20 @@ from sqlalchemy.orm import Session
 from app.database import get_session
 from app.domain.classification import NormalizationKind, TransactionType, clean_raw_value
 from app.models import Account, NormalizationMapping
-from app.schemas import NormalizationMappingCreate, NormalizationMappingOut
+from app.schemas import (
+    ApplyMappingPlanIn,
+    ApplyResult,
+    MappingPreview,
+    MappingPreviewIn,
+    NormalizationMappingCreate,
+    NormalizationMappingOut,
+)
+from app.services.ingest_service import AccountNotFoundError
+from app.services.mapping_preview_service import (
+    MappingPlanValidationError,
+    apply_mapping_plan,
+    preview_mappings,
+)
 
 router = APIRouter(prefix="/mappings", tags=["mappings"])
 
@@ -107,6 +120,38 @@ def list_mappings(
     if account_id is not None:
         stmt = stmt.where(NormalizationMapping.account_id == account_id)
     return list(db.scalars(stmt.order_by(NormalizationMapping.id)).all())
+
+
+@router.post(
+    "/preview",
+    response_model=MappingPreview,
+    summary="Preview mapping impact",
+)
+def preview_mapping_plan(
+    payload: MappingPreviewIn,
+    db: Session = Depends(get_session),
+) -> MappingPreview:
+    """Compute per-rule impact against stored transactions. Performs no writes."""
+    return preview_mappings(db, payload.rules, account_id=payload.account_id)
+
+
+@router.post("/apply", response_model=ApplyResult, summary="Apply a mapping plan")
+def apply_approved_plan(
+    payload: ApplyMappingPlanIn,
+    db: Session = Depends(get_session),
+) -> ApplyResult:
+    """Insert approved rules and reclassify in one transaction."""
+    try:
+        return apply_mapping_plan(db, payload)
+    except MappingPlanValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=exc.errors,
+        ) from exc
+    except AccountNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
 
 
 @router.delete("/{mapping_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -1,8 +1,12 @@
+from datetime import date
+from decimal import Decimal
+
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.domain.classification import NormalizationKind
 from app.domain.db_lookup import DbNormalizationLookup
+from app.models import Transaction
 
 
 def _account(client: TestClient) -> int:
@@ -166,3 +170,80 @@ def test_category_mapping_merchant_scope(client: TestClient, db_session: Session
         "Shopping"
     )
     assert lookup.resolve(NormalizationKind.CATEGORY, "shopping", 999) == "Shopping"
+
+
+def test_preview_and_apply_endpoints(client: TestClient, db_session: Session) -> None:
+    account_id = _account(client)
+    db_session.add(
+        Transaction(
+            account_id=account_id,
+            transaction_date=date(2024, 6, 1),
+            description="COFFEE",
+            amount=Decimal("4.50"),
+            transaction_type="SPEND",
+            is_spend=True,
+            category_raw="Food & Drink",
+            category_normalized=None,
+            dedupe_hash="preview-apply-coffee",
+            raw={},
+        )
+    )
+    db_session.commit()
+
+    body = {
+        "rules": [
+            {
+                "kind": "category",
+                "raw_value": "Food & Drink",
+                "canonical_value": "Dining",
+            }
+        ],
+        "account_id": account_id,
+    }
+    preview = client.post("/mappings/preview", json=body)
+    assert preview.status_code == 200, preview.text
+    payload = preview.json()
+    assert payload["scanned"] == 1
+    assert payload["total_would_change"] == 1
+    assert payload["rules"][0]["would_change"] == 1
+    assert client.get("/mappings").json() == []
+
+    listed_before = client.get("/transactions", params={"account_id": account_id}).json()
+    assert listed_before[0]["category_normalized"] is None
+
+    applied = client.post("/mappings/apply", json=body)
+    assert applied.status_code == 200, applied.text
+    result = applied.json()
+    assert len(result["created_mapping_ids"]) == 1
+    assert result["skipped_duplicates"] == []
+    assert result["reclass_updated"] == 1
+    assert result["unmapped_after"]["categories"] == []
+
+    mappings = client.get("/mappings").json()
+    assert len(mappings) == 1
+    assert mappings[0]["raw_value"] == "food & drink"
+    listed = client.get("/transactions", params={"account_id": account_id}).json()
+    assert listed[0]["category_normalized"] == "Dining"
+
+    again = client.post("/mappings/apply", json=body)
+    assert again.status_code == 200, again.text
+    assert again.json()["created_mapping_ids"] == []
+    assert len(again.json()["skipped_duplicates"]) == 1
+
+
+def test_apply_endpoint_rejects_invalid_plan(client: TestClient) -> None:
+    response = client.post(
+        "/mappings/apply",
+        json={
+            "rules": [
+                {
+                    "kind": "merchant",
+                    "raw_value": "x",
+                    "canonical_value": "X",
+                    "merchant": "Nope",
+                }
+            ]
+        },
+    )
+    assert response.status_code == 422
+    assert "merchant only valid for category" in str(response.json()["detail"])
