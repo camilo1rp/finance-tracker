@@ -7,3 +7,7 @@ pandas
 python-multipart
 pytest
 httpx
+langchain>=1.0,<2
+langgraph>=1.0,<2
+langgraph-checkpoint-postgres
+langchain-anthropic
