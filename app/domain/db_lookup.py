@@ -6,10 +6,13 @@ Design note: this is the one file in domain/ that's allowed to touch the DB
 Kept separate from normalize.py/classification.py so those stay testable
 with a fake in-memory lookup that doesn't need this file at all.
 """
+from collections.abc import Sequence
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domain.classification import NormalizationKind, NormalizationLookup
+from app.domain.merged_lookup import MergedNormalizationLookup, RuleSpec
 from app.models import NormalizationMapping
 
 
@@ -79,3 +82,26 @@ class DbNormalizationLookup(NormalizationLookup):
         else:
             stmt = stmt.where(NormalizationMapping.merchant == merchant)
         return self.db.execute(stmt).scalar_one_or_none()
+
+
+def merged_lookup_from_db(
+    db: Session,
+    proposed: Sequence[RuleSpec],
+    kinds: set[str],
+) -> MergedNormalizationLookup:
+    """Load existing mappings for `kinds` once, then layer `proposed` on top."""
+    stmt = select(NormalizationMapping)
+    if kinds:
+        stmt = stmt.where(NormalizationMapping.kind.in_(kinds))
+    existing = [
+        RuleSpec(
+            kind=row.kind,
+            raw_value=row.raw_value,
+            canonical_value=row.canonical_value,
+            account_id=row.account_id,
+            merchant=row.merchant,
+            ref=f"db:{row.id}",
+        )
+        for row in db.scalars(stmt).all()
+    ]
+    return MergedNormalizationLookup([*existing, *proposed])
