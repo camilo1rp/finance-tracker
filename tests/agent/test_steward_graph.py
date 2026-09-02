@@ -4,7 +4,7 @@ from langgraph.types import Command
 from sqlalchemy.orm import Session
 
 from app.agent.config import in_memory_checkpointer
-from app.agent.steward_graph import build_steward_graph
+from app.agent.steward_graph import build_steward_builder, build_steward_graph
 from app.schemas import ProposedMappingIn
 from tests.agent.helpers import (
     RULES,
@@ -89,3 +89,18 @@ def test_steward_interrupt_flow(
     assert apply_result["created_mapping_ids"] == [1]
     assert apply_result["reclass_updated"] == 1
     assert not resumed.get("__interrupt__")
+
+
+def test_steward_standalone_compile_still_uses_checkpointer() -> None:
+    model = ScriptedChatModel(responses=[AIMessage(content="idle")])
+    graph = build_steward_graph(model=model, checkpointer=in_memory_checkpointer())
+    assert graph.checkpointer is not None
+
+
+def test_steward_compiles_without_checkpointer_for_subagent_use() -> None:
+    model = ScriptedChatModel(responses=[AIMessage(content="idle")])
+    builder = build_steward_builder(model=model)
+    graph = builder.compile()
+    assert graph.checkpointer is None
+    nested = build_steward_graph(model=model, checkpointer=None)
+    assert nested.checkpointer is None

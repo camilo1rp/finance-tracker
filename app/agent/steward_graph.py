@@ -115,10 +115,8 @@ def execute(state: StewardState) -> Command[Literal["steward"]]:
     )
 
 
-def build_steward_graph(*, model=None, checkpointer=None):
-    """Compile the steward graph. `checkpointer` is required for interrupt()."""
-    if checkpointer is None:
-        raise ValueError("checkpointer is required (use InMemorySaver in tests)")
+def build_steward_builder(*, model=None) -> StateGraph:
+    """Uncompiled steward graph. Entrypoints decide whether to attach a checkpointer."""
     steward = create_agent(
         model if model is not None else model_name(),
         STEWARD_AGENT_TOOLS,
@@ -136,4 +134,16 @@ def build_steward_graph(*, model=None, checkpointer=None):
         _route_after_steward,
         {"human_approval": "human_approval", "__end__": END},
     )
+    return builder
+
+
+def build_steward_graph(*, model=None, checkpointer=None):
+    """Compile the steward graph.
+
+    Standalone CLI/tests pass a checkpointer. The coordinator path omits it so
+    the subgraph inherits the parent's checkpointer and interrupt() propagates.
+    """
+    builder = build_steward_builder(model=model)
+    if checkpointer is None:
+        return builder.compile()
     return builder.compile(checkpointer=checkpointer)
