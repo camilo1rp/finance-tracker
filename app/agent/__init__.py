@@ -1,1 +1,1 @@
-"""LangGraph agents for mapping stewardship. Coordinator/analyst come later."""
+"""LangGraph agents: coordinator, analyst, and mapping steward."""

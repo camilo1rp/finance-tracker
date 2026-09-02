@@ -25,6 +25,16 @@ class ScriptedChatModel(FakeMessagesListChatModel):
         return ChatResult(generations=[ChatGeneration(message=response)])
 
 
+def tool_names(result: dict) -> list[str]:
+    names: list[str] = []
+    for message in result.get("messages") or []:
+        for call in getattr(message, "tool_calls", None) or []:
+            name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
+            if name:
+                names.append(name)
+    return names
+
+
 RULES = [
     {"kind": "category", "raw_value": "Food & Drink", "canonical_value": "Dining"},
     {"kind": "category", "raw_value": "Shopping", "canonical_value": "Shopping"},

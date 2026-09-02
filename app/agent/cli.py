@@ -1,12 +1,13 @@
-"""Tiny REPL to run the steward against a thread id."""
+"""REPL for the coordinator (default) or the standalone steward."""
 from __future__ import annotations
 
-import sys
+import argparse
 import uuid
 
 from langgraph.types import Command
 
 from app.agent.config import open_checkpointer
+from app.agent.coordinator import build_coordinator
 from app.agent.steward_graph import build_steward_graph
 
 RECURSION_LIMIT = 25
@@ -56,12 +57,12 @@ def _decision(rules: list) -> dict:
     return {"decision": "approve", "rules": rules}
 
 
-def _print_last_ai(result: dict) -> None:
+def _print_last_ai(result: dict, prefix: str) -> None:
     for message in reversed(result.get("messages") or []):
         content = getattr(message, "content", None)
         name = getattr(message, "type", None) or message.__class__.__name__
         if name in {"ai", "AIMessage"} and content:
-            print(f"steward> {content}")
+            print(f"{prefix}> {content}")
             return
 
 
@@ -70,25 +71,51 @@ def _handle_interrupt(graph, config: dict, payload: dict) -> dict:
     return graph.invoke(Command(resume=_decision(payload.get("rules") or [])), config)
 
 
-def _run_until_idle(graph, payload, config: dict) -> None:
+def _run_until_idle(graph, payload, config: dict, prefix: str) -> None:
     result = graph.invoke(payload, config)
     while True:
-        _print_last_ai(result)
+        _print_last_ai(result, prefix)
         interrupts = result.get("__interrupt__") or ()
         if not interrupts:
             return
         result = _handle_interrupt(graph, config, interrupts[0].value)
 
 
-def main() -> None:
-    thread_id = sys.argv[1] if len(sys.argv) > 1 else str(uuid.uuid4())
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Conversational finance agent. Default is the coordinator. "
+            "Kill/restart with the same thread id to resume a paused approval "
+            "(Postgres or SQLite file checkpointer)."
+        )
+    )
+    parser.add_argument(
+        "thread_id",
+        nargs="?",
+        help="Reuse this id to resume a paused approval after restart",
+    )
+    parser.add_argument(
+        "--steward",
+        action="store_true",
+        help="Run the steward graph alone (no coordinator)",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = _parse_args(argv)
+    thread_id = args.thread_id or str(uuid.uuid4())
+    prefix = "steward" if args.steward else "agent"
     print(
-        f"thread_id={thread_id}  "
+        f"entrypoint={prefix}  thread_id={thread_id}  "
         "(pass this arg to resume after kill/restart; "
         "checkpoints persist on Postgres and on the SQLite file checkpointer)"
     )
     with open_checkpointer() as checkpointer:
-        graph = build_steward_graph(checkpointer=checkpointer)
+        if args.steward:
+            graph = build_steward_graph(checkpointer=checkpointer)
+        else:
+            graph = build_coordinator(checkpointer=checkpointer)
         config = _config(thread_id)
         snapshot = graph.get_state(config)
         if snapshot.interrupts:
@@ -98,6 +125,7 @@ def main() -> None:
                 graph,
                 Command(resume=_decision(payload.get("rules") or [])),
                 config,
+                prefix,
             )
         while True:
             try:
@@ -107,7 +135,12 @@ def main() -> None:
                 return
             if not text or text.lower() in {"quit", "exit"}:
                 return
-            _run_until_idle(graph, {"messages": [{"role": "user", "content": text}]}, config)
+            _run_until_idle(
+                graph,
+                {"messages": [{"role": "user", "content": text}]},
+                config,
+                prefix,
+            )
 
 
 if __name__ == "__main__":
