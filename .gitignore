@@ -7,4 +7,6 @@ __pycache__/
 .env
 .env.local
 *.db
+*.sqlite
 *.sqlite3
+.agent_checkpoints.sqlite

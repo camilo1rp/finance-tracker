@@ -82,7 +82,11 @@ def _run_until_idle(graph, payload, config: dict) -> None:
 
 def main() -> None:
     thread_id = sys.argv[1] if len(sys.argv) > 1 else str(uuid.uuid4())
-    print(f"thread_id={thread_id}  (pass this arg to resume after restart)")
+    print(
+        f"thread_id={thread_id}  "
+        "(pass this arg to resume after kill/restart; "
+        "checkpoints persist on Postgres and on the SQLite file checkpointer)"
+    )
     with open_checkpointer() as checkpointer:
         graph = build_steward_graph(checkpointer=checkpointer)
         config = _config(thread_id)

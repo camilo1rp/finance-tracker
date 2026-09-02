@@ -12,7 +12,7 @@ from app.agent.schemas import StewardState
 from app.agent.tools import STEWARD_AGENT_TOOLS
 from app.agent.config import model_name, tool_session
 from app.schemas import ApplyMappingPlanIn, ProposedMappingIn
-from app.services.mapping_preview_service import apply_mapping_plan
+from app.services.mapping_preview_service import apply_mapping_plan, preview_mappings
 
 STEWARD_PROMPT = """You clean up normalization mappings.
 Workflow: fetch unmapped values → inspect examples → propose rules → always preview before submitting → submit the plan with the preview attached.
@@ -26,10 +26,35 @@ def _route_after_steward(state: StewardState) -> Literal["human_approval", "__en
     return "__end__"
 
 
+def _as_proposed_rules(rules: list) -> list[ProposedMappingIn]:
+    parsed: list[ProposedMappingIn] = []
+    for rule in rules:
+        if isinstance(rule, ProposedMappingIn):
+            parsed.append(rule)
+        else:
+            parsed.append(ProposedMappingIn.model_validate(rule))
+    return parsed
+
+
+def _recompute_preview(rules: list, account_id: int | None) -> dict:
+    """Fresh preview for `rules`. Opens a short-lived session; never call across interrupt()."""
+    parsed = _as_proposed_rules(rules)
+    with tool_session() as db:
+        preview = preview_mappings(db, parsed, account_id=account_id)
+    return preview.model_dump(mode="json")
+
+
 def human_approval(state: StewardState) -> Command[Literal["steward", "execute"]]:
+    submitted = state.get("proposed_rules") or []
+    account_scope = state.get("account_scope")
+    # Recompute from the rules actually in state. Do not trust pending_preview:
+    # the model can submit a different set than it last previewed, or skip preview.
+    # Close the session before interrupt() — this node restarts on resume and the
+    # graph may sit paused for hours.
+    preview = _recompute_preview(submitted, account_scope)
     payload = {
-        "rules": state.get("proposed_rules") or [],
-        "preview": state.get("pending_preview"),
+        "rules": submitted,
+        "preview": preview,
         "rationale": state.get("rationale"),
     }
     decision = interrupt(payload)
@@ -51,8 +76,13 @@ def human_approval(state: StewardState) -> Command[Literal["steward", "execute"]
         )
     rules = decision.get("rules")
     if rules is None:
-        rules = state.get("proposed_rules") or []
-    return Command(goto="execute", update={"proposed_rules": rules})
+        rules = submitted
+    # Evidence for exactly the subset that will run.
+    subset_preview = _recompute_preview(rules, account_scope)
+    return Command(
+        goto="execute",
+        update={"proposed_rules": rules, "pending_preview": subset_preview},
+    )
 
 
 def execute(state: StewardState) -> Command[Literal["steward"]]:

@@ -11,10 +11,15 @@ from sqlalchemy.orm import Session, sessionmaker
 _session_factory: sessionmaker[Session] | None = None
 
 DEFAULT_MODEL = "anthropic:claude-sonnet-4-6"
+DEFAULT_CHECKPOINT_PATH = ".agent_checkpoints.sqlite"
 
 
 def model_name() -> str:
     return os.environ.get("STEWARD_MODEL", DEFAULT_MODEL)
+
+
+def checkpoint_sqlite_path() -> str:
+    return os.environ.get("AGENT_CHECKPOINT_PATH", DEFAULT_CHECKPOINT_PATH)
 
 
 def set_session_factory(factory: sessionmaker[Session] | None) -> None:
@@ -46,6 +51,15 @@ def checkpoint_conn_string(database_url: str) -> str:
 
 
 @contextmanager
+def sqlite_file_checkpointer(path: str | None = None) -> Iterator[Any]:
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    with SqliteSaver.from_conn_string(path or checkpoint_sqlite_path()) as saver:
+        saver.setup()
+        yield saver
+
+
+@contextmanager
 def open_checkpointer(*, in_memory: bool = False) -> Iterator[Any]:
     if in_memory:
         from langgraph.checkpoint.memory import InMemorySaver
@@ -56,17 +70,15 @@ def open_checkpointer(*, in_memory: bool = False) -> Iterator[Any]:
     from app.config import settings
 
     url = settings.database_url
-    if url.startswith("sqlite"):
-        from langgraph.checkpoint.memory import InMemorySaver
+    if url.startswith("postgresql"):
+        from langgraph.checkpoint.postgres import PostgresSaver
 
-        print("warning: sqlite DATABASE_URL; checkpoints will not survive restart")
-        yield InMemorySaver()
+        with PostgresSaver.from_conn_string(checkpoint_conn_string(url)) as saver:
+            saver.setup()
+            yield saver
         return
 
-    from langgraph.checkpoint.postgres import PostgresSaver
-
-    with PostgresSaver.from_conn_string(checkpoint_conn_string(url)) as saver:
-        saver.setup()
+    with sqlite_file_checkpointer() as saver:
         yield saver
 
 
