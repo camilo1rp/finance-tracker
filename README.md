@@ -23,11 +23,17 @@ python -m app.agent.cli <thread_id>
 python -m app.agent.cli --steward <thread_id>
 ```
 
-When a mapping plan is submitted, the same conversation pauses with a preview computed from the rules actually submitted. Type:
+See `AGENT-QA.md` for a live-model sitting that checks routing, approval, kill/restart, and API cross-checks.
 
-- `approve` — apply every listed rule
+When a mapping plan is submitted, the same conversation pauses with a preview computed from the ops actually submitted. Type:
+
+- `approve` — apply every listed op
 - `reject` — apply nothing
 - `edit 0,2` — apply those indexes only
+
+Plans are CRUD: `create`, `update` (change a rule's canonical by `mapping_id`), and `delete`. A create whose identity already exists with a **different** canonical is a conflict, not a skip — submit an `update` on that id instead. After apply, the steward reports `created_ids` / `updated_ids` / `deleted_ids` and `reclass_updated` verbatim.
+
+`PATCH /mappings/{id}` updates a canonical and reclassifies in one transaction. `DELETE /mappings/{id}` now reclassifies in the same transaction and returns `200` with reclass counts (not `204`).
 
 The conversation then continues on the same thread.
 

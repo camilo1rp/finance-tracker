@@ -6,6 +6,8 @@ finance-tracker/
 ├── requirements.txt
 ├── .env.example
 ├── README.md                # API + agent CLI
+├── QA.md                    # import QA pass (Chase + Apple)
+├── AGENT-QA.md              # live agent CLI QA pass
 ├── app/
 │   ├── main.py              # FastAPI app instantiation, router registration
 │   ├── config.py            # Settings (env-driven: DB url, etc.)
@@ -21,7 +23,7 @@ finance-tracker/
 │   │   ├── dedupe.py         # canonical rows + existing hashes -> new vs duplicate
 │   │   ├── classification.py # TransactionType + NormalizationLookup + classify_*
 │   │   ├── db_lookup.py      # DbNormalizationLookup (the one domain file that queries the DB)
-│   │   └── merged_lookup.py  # In-memory lookup: existing rules + proposed, same precedence
+│   │   └── merged_lookup.py  # In-memory lookup: db:/create:/update: refs, same precedence
 │   │
 │   ├── services/              # Orchestration layer -- coordinates domain + persistence
 │   │   ├── ingest_service.py
@@ -44,7 +46,7 @@ finance-tracker/
 │       ├── config.py          # model name, tool sessions, checkpointer factory
 │       └── tools/
 │           ├── read.py        # owners/accounts/unmapped/mappings/txns + analytics
-│           ├── steward.py     # preview_mapping_rules, submit_plan
+│           ├── steward.py     # preview_mapping_rules, submit_plan (ops: create/update/delete)
 │           └── subagents.py   # ask_analyst, run_data_steward
 │
 └── tests/
@@ -59,4 +61,4 @@ finance-tracker/
 
 The coordinator compiles **with** the checkpointer. Analyst and steward compile **without** one so they inherit it at runtime; that is what lets a steward `interrupt()` bubble to the CLI on the same thread.
 
-`python -m app.agent.cli <thread_id>` is the coordinator. `--steward` compiles the steward graph with the checkpointer for direct use. Approval UX is `approve` / `reject` / `edit 0,2`. Checkpoints persist on Postgres or on the SQLite file at `AGENT_CHECKPOINT_PATH`.
+`python -m app.agent.cli <thread_id>` is the coordinator. `--steward` compiles the steward graph with the checkpointer for direct use. Approval UX is `approve` / `reject` / `edit 0,2` over plan ops. Checkpoints persist on Postgres or on the SQLite file at `AGENT_CHECKPOINT_PATH`.
