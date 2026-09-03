@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_session
-from app.models import Owner, Transaction, effective_category, effective_merchant
+from app.models import Owner, Transaction, TransactionOverride, effective_category, effective_merchant
 from app.schemas import ReclassifyResultOut, TransactionOut, TransactionPatch, UnmappedValuesOut
 from app.services.ingest_service import AccountNotFoundError, reclassify_transactions
 
@@ -79,6 +79,14 @@ def patch_transaction(
             detail=f"transaction {transaction_id} not found",
         )
     if "category_override" in payload.model_fields_set:
+        if txn.category_override != payload.category_override:
+            provenance = db.execute(
+                select(TransactionOverride).where(
+                    TransactionOverride.transaction_id == txn.id
+                )
+            ).scalar_one_or_none()
+            if provenance is not None:
+                db.delete(provenance)
         txn.category_override = payload.category_override
     if "merchant_override" in payload.model_fields_set:
         txn.merchant_override = payload.merchant_override

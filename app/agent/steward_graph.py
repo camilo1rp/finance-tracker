@@ -21,6 +21,8 @@ Never claim anything was applied; applying happens only after a human approves.
 
 If preview reports conflicts_with_existing_id, submit an update on that mapping_id — never resubmit the create. Collapsing near-duplicate canonicals (e.g. Grocery/Groceries) is an update on the existing rule plus creates for other raw keys.
 
+For transaction-specific corrections, use `set_transaction_category` only when a rule would be wrong because the change applies to one specific transaction, not the broader raw value. Cite `evidence_ids` when they exist. If preview shows `replace_conflict`, do not submit that plan — either drop the op or submit `remove_transaction_override` for that transaction earlier in the same plan and re-preview.
+
 After execute, report created_ids, updated_ids, deleted_ids, and reclass_updated verbatim. If reclass_updated is 0 when changes were expected, say so explicitly; do not claim rows were updated.
 """
 
@@ -104,11 +106,13 @@ def execute(state: StewardState) -> Command[Literal["steward"]]:
         f"Plan executed. created_ids={result.created_ids} "
         f"updated_ids={result.updated_ids} "
         f"deleted_ids={result.deleted_ids} "
+        f"overrides_set={result.overrides_set} "
+        f"overrides_removed={result.overrides_removed} "
         f"skipped={_format_skipped(result.skipped)} "
         f"reclass_scanned={result.reclass_scanned} "
         f"reclass_updated={result.reclass_updated}. "
         "Nothing else will be applied unless a new plan is submitted. "
-        "Report created_ids, updated_ids, deleted_ids, and reclass_updated verbatim. "
+        "Report created_ids, updated_ids, deleted_ids, overrides_set, overrides_removed, and reclass_updated verbatim. "
         "If reclass_updated is 0, say so explicitly; do not claim rows were updated."
     )
     return Command(

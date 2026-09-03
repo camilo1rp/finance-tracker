@@ -53,7 +53,7 @@ finance-tracker/
 │       ├── config.py          # model name, tool sessions, checkpointer factory
 │       └── tools/
 │           ├── read.py        # owners/accounts/unmapped/mappings/txns + analytics
-│           ├── steward.py     # preview_mapping_rules, submit_plan (ops: create/update/delete)
+│           ├── steward.py     # preview_mapping_rules, submit_plan (rule ops + txn override ops; still no apply tool)
 │           └── subagents.py   # ask_analyst, run_data_steward
 │
 └── tests/

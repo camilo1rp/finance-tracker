@@ -481,7 +481,7 @@ Shared analytics query params (unless noted): `date_from: date | None = None`, `
 |---|---|---|---|---|---|---|---|
 | POST | `/transactions/reclassify` | `account_id=None` | — | `ReclassifyResultOut` | 200; 404 unknown account | `reclassify_transactions` | Does not re-import. Commits in service. |
 | GET | `/transactions` | `date_from`, `date_to`, `owner_id`, `category`, `merchant`, `account_id` all optional | — | `list[TransactionOut]` | 200 | inline select | **No** `spend_only`. **No** `date_to` default to today. `category`/`merchant` = **effective** values. No limit. |
-| PATCH | `/transactions/{transaction_id}` | path id | `TransactionPatch` | `TransactionOut` | 200; 404 txn or owner | inline | Only fields in `model_fields_set`. Never writes `category_raw` / `merchant_raw`. Commits in router. |
+| PATCH | `/transactions/{transaction_id}` | path id | `TransactionPatch` | `TransactionOut` | 200; 404 txn or owner | inline | Only fields in `model_fields_set`. Never writes `category_raw` / `merchant_raw`. If `category_override` changes, deletes any `transaction_overrides` provenance row in the same transaction. Commits in router. |
 
 ### 4.7 `app/routers/analytics.py` (9)
 
@@ -517,13 +517,16 @@ All except `/unmapped` and `/search` default `spend_only=True`. All except `/unm
 | `CreateMappingOp` | `op="create"`, `kind`, `raw_value`, `canonical_value`, `account_id=None`, `merchant=None` | plan ops |
 | `UpdateMappingOp` | `op="update"`, `mapping_id`, `canonical_value` | plan ops; PATCH wrapper |
 | `DeleteMappingOp` | `op="delete"`, `mapping_id` | plan ops; DELETE wrapper |
+| `SetTransactionCategoryOp` | `op="set_transaction_category"`, `transaction_id`, `category`, `evidence_ids=[]`, `rationale=None` | plan ops |
+| `RemoveTransactionOverrideOp` | `op="remove_transaction_override"`, `transaction_id`, `rationale=None` | plan ops |
 | `MappingOp` | discriminated union on `op` | plans, preview, apply, tools, steward state |
 | `MappingPlanIn` | `ops: list[MappingOp]`, `account_id=None` (scan/reclass scope) | preview/apply HTTP + services + steward |
 | `MappingPatchIn` | `canonical_value` | `PATCH /mappings/{id}` |
 | `SampleChange` | `transaction_id`, `description`, `field`, `current_effective`, `new_effective` | `OpImpact.samples` |
 | `FallbackCount` | `mapping_id`, `count` | delete impact |
 | `OpImpact` | `index`, `op`, `would_change=0`, `suppressed_by_override=0`, `shadowed_by_existing=0`, `duplicate_of_existing_id`, `conflicts_with_existing_id`, `existing_canonical`, `old_canonical`, `new_canonical`, `falls_back_to`, `would_become_unmapped=0`, `samples` | `MappingPreview.ops` |
-| `MappingPreview` | `scanned`, `total_would_change`, `ops`, `validation_errors` | preview HTTP/tool; interrupt payload |
+| `OverridePreview` | `transaction_id`, `exists`, `current_override`, `current_effective_category`, `proposed`, `action`, `evidence_ids` | `MappingPreview.overrides` |
+| `MappingPreview` | `scanned`, `total_would_change`, `ops`, `overrides=[]`, `validation_errors` | preview HTTP/tool; interrupt payload |
 | `MappingPatchOut` | mapping fields + `reclass_scanned`, `reclass_updated` | PATCH mapping |
 | `MappingDeleteOut` | `deleted_id`, `reclass_scanned`, `reclass_updated` | DELETE mapping |
 | `ImportMappingIn` | `date_col`, `description_col`, `amount_col`, optional `category_col`, `owner_col`, `type_col`, `merchant_col`, `sign_convention` | `AccountCreate.default_mapping` |
@@ -531,7 +534,7 @@ All except `/unmapped` and `/search` default `spend_only=True`. All except `/unm
 | `AccountOut` | `id`, `name`, `last4`, `default_owner_id`, `source_format` | accounts HTTP; `list_accounts` tool (**no mapping**) |
 | `UnmappedValuesOut` | `transaction_types`, `categories`, `owners`, `merchants=[]` | import/reclass/apply/unmapped |
 | `SkippedOp` | `op: MappingOp`, `reason: "duplicate" \| "missing"` | `ApplyResult.skipped` |
-| `ApplyResult` | `created_ids`, `updated_ids`, `deleted_ids`, `skipped`, `reclass_scanned`, `reclass_updated`, `unmapped_after` | apply HTTP; steward `apply_result` |
+| `ApplyResult` | `created_ids`, `updated_ids`, `deleted_ids`, `skipped`, `overrides_set=0`, `overrides_removed=0`, `reclass_scanned`, `reclass_updated`, `unmapped_after` | apply HTTP; steward `apply_result` |
 | `ImportResult` | `account_id`, `import_batch_id`, `total_rows_read`, `inserted`, `duplicates_skipped`, `unmapped`, `errors` | `POST /imports` |
 | `TransactionOut` | `id`, `account_id`, `transaction_date`, `description`, `amount`, `transaction_type`, `is_spend`, category triple, `owner_id`, merchant triple | list/patch/largest/search tools. **Omits** `owner_raw`, `raw_type`, `dedupe_hash`, `raw`, `import_batch_id` |
 | `ReclassifyResultOut` | `scanned`, `updated`, `unmapped` | `POST /transactions/reclassify` |
@@ -540,7 +543,7 @@ All except `/unmapped` and `/search` default `spend_only=True`. All except `/unm
 | `TotalOut` | `total`, `count`, `average` | get_total |
 | `MerchantSummary` | `merchant`, `total`, `count` | top_merchants |
 
-**Discriminated union:** `MappingOp = Annotated[Union[CreateMappingOp, UpdateMappingOp, DeleteMappingOp], Field(discriminator="op")]`. Parser: `app/schemas.py::parse_mapping_op` (passthrough if already a model; else `TypeAdapter`). **No `rules` field and no alias** on `MappingPlanIn`.
+**Discriminated union:** `MappingOp = Annotated[Union[CreateMappingOp, UpdateMappingOp, DeleteMappingOp, SetTransactionCategoryOp, RemoveTransactionOverrideOp], Field(discriminator="op")]`. Parser: `app/schemas.py::parse_mapping_op` (passthrough if already a model; else `TypeAdapter`). **No `rules` field and no alias** on `MappingPlanIn`.
 
 ### 5.2 `app/agent/schemas.py`
 
@@ -698,7 +701,11 @@ Identity collision on create: same canonical → `duplicate_of_existing_id` (pre
 
 **`apply_mapping_plan(db, plan) -> ApplyResult`**
 
-Order inside one try: **deletes** (missing → skip `missing`) + flush; **updates** (missing → error) + flush; **creates** (duplicate skip / conflict raise) + flush; `run_reclassification(db, plan.account_id)` + flush; `unmapped_summary`; **`db.commit()`**. `except: db.rollback(); raise`.
+Order inside one try: **deletes** (missing → skip `missing`) + flush; **updates** (missing → error) + flush; **creates** (duplicate skip / conflict raise) + flush; **overrides** (`set_transaction_category` / `remove_transaction_override`) + flush; `run_reclassification(db, plan.account_id)` + flush; `unmapped_summary`; **`db.commit()`**. `except: db.rollback(); raise`.
+
+Override validation happens before any write in `_override_conflict_errors`. `set_transaction_category` rejects the whole plan when the transaction is missing or its current `category_override` differs and the plan did not remove that override earlier in the same override-op sequence. Writes target `Transaction.category_override`; `transaction_overrides` is provenance only.
+
+`ApplyResult` now also carries `overrides_set` and `overrides_removed`, and execute/CLI summaries are required to surface those counts verbatim.
 
 Idempotent re-apply of mixed plan: creates skip duplicate, deletes skip missing, updates re-applied (canonical already new → reclass_updated 0). Proven: `test_apply_idempotent`, `test_apply_mixed_plan_atomic_and_reapply`. Reclass failure rolls back mapping writes: `test_apply_transactional`, `test_apply_mixed_plan_rolls_back_on_reclass_failure`.
 
@@ -998,6 +1005,8 @@ Never claim anything was applied; applying happens only after a human approves.
 
 If preview reports conflicts_with_existing_id, submit an update on that mapping_id — never resubmit the create. Collapsing near-duplicate canonicals (e.g. Grocery/Groceries) is an update on the existing rule plus creates for other raw keys.
 
+For transaction-specific corrections, use `set_transaction_category` only when a rule would be wrong because the change applies to one specific transaction, not the broader raw value. Cite `evidence_ids` when they exist. If preview shows `replace_conflict`, do not submit that plan — either drop the op or submit `remove_transaction_override` for that transaction earlier in the same plan and re-preview.
+
 After execute, report created_ids, updated_ids, deleted_ids, and reclass_updated verbatim. If reclass_updated is 0 when changes were expected, say so explicitly; do not claim rows were updated.
 ```
 
@@ -1008,7 +1017,7 @@ After execute, report created_ids, updated_ids, deleted_ids, and reclass_updated
 
 Reject HumanMessage from execute (verbatim content): `"Plan rejected. Nothing was applied. Propose a different plan if needed."`
 
-Execute summary template: `"Plan executed. created_ids=... updated_ids=... deleted_ids=... skipped=... reclass_scanned=... reclass_updated=.... Nothing else will be applied unless a new plan is submitted. Report created_ids, updated_ids, deleted_ids, and reclass_updated verbatim. If reclass_updated is 0, say so explicitly; do not claim rows were updated."`
+Execute summary template: `"Plan executed. created_ids=... updated_ids=... deleted_ids=... overrides_set=... overrides_removed=... skipped=... reclass_scanned=... reclass_updated=.... Nothing else will be applied unless a new plan is submitted. Report created_ids, updated_ids, deleted_ids, overrides_set, overrides_removed, and reclass_updated verbatim. If reclass_updated is 0, say so explicitly; do not claim rows were updated."`
 
 ### 8.5 Interrupt / approval contract
 
@@ -1017,7 +1026,7 @@ Execute summary template: `"Plan executed. created_ids=... updated_ids=... delet
 ```
 {
   "ops": submitted,          # list[dict] as stored by submit_plan
-  "preview": preview,        # MappingPreview.model_dump(mode="json")
+  "preview": preview,        # MappingPreview.model_dump(mode="json"); additive `overrides` key
   "rationale": state.get("rationale"),
 }
 ```
@@ -1088,6 +1097,12 @@ CLI (`app/agent/cli.py::_decision`): `reject*` → `{"decision":"reject","ops":[
 | 11 | Tests never emit LangSmith traces | Dev shell may have tracing on | `conftest.py` sets tracing env to `false` before import + autouse fixture; legacy `LANGCHAIN_*` aliases too | `tests/test_tracing_isolation.py` |
 | 12 | `preview_mappings` is pure | Agent can preview freely | no session dirty | `test_preview_is_pure` |
 | 13 | Reclassify never writes overrides / raw columns (except merchant_raw backfill when empty) | Preserve import + user fixes | `run_reclassification` | `test_reclassify_applies_new_type_and_category_mappings`, `test_reclassify_backfills_merchant_from_description` |
+| 13.1 | Enrichment writes only to `transaction_evidence`, `merchant_senders`, and never to any `Transaction` column or mapping table; these are observation caches and do not alter effective values. | Preserves writes-only-via-plan-gate for user-visible data | `app/services/enrichment_service.py::enrich_transaction` | `tests/enrichment/test_enrichment_service.py` |
+| 13.2 | `category_override` is written only by `apply_mapping_plan`'s overrides stage and the PATCH endpoint; `run_reclassification` never writes it. | Override precedence stays explicit and stable | `apply_mapping_plan`, `app/routers/transactions.py::patch_transaction`, `run_reclassification` | `tests/services/test_override_apply.py::test_override_survives_reclassify_and_analytics_use_effective_category`, `tests/routers/test_transaction_override_patch.py` |
+| 13.3 | A `set_transaction_category` on a transaction whose `category_override` differs is a conflict that rejects the whole plan before any write unless the same plan removes that override first. | User-set overrides are never silently replaced | `_override_conflict_errors` | `tests/services/test_override_apply.py::test_set_override_create_duplicate_remove_and_replace` |
+| 13.4 | Raw email content never reaches a DB row, trace, or log; traces of enrichment functions carry redacted inputs/outputs. | Privacy | `_enrichment_trace_inputs` / `_enrichment_trace_outputs` | `tests/enrichment/test_enrichment_tracing.py` |
+| 13.5 | `EmailSource.search` outside the allowlist returns empty without contacting the provider; `fetch` re-validates both the ref sender and the fetched sender. | Scope enforcement independent of caller correctness | `AllowlistedEmailSource` | `tests/enrichment/test_allowlist.py` |
+| 13.6 | Preview output for rule-only plans is unchanged except for the additive `overrides=[]` key. | Existing consumers keep working | `preview_mappings` | `tests/services/test_override_preview.py::test_rule_only_preview_keeps_existing_shape_plus_empty_overrides` |
 | 14 | Type/owner recompute gated on `raw_type` / `owner_raw` | Sign-derived and default-owner rows stay | `run_reclassification`; preview `_rule_in_scope` | `test_preview_gates` |
 | 15 | `spend_only` totals use `abs(amount)` and SPEND only | Mixed-sign CSVs | `_amount_expr`, `_apply_filters` | `test_spend_only_excludes_payments_and_refunds`, `test_mixed_sign_spends_use_abs` |
 | 16 | Effective category/merchant coalesce override > normalized > raw | Analytics + list filters | SQL case + `resolved_merchant` | `test_summarize_category_coalesce_override_wins`, `test_merchant_filter_and_group_by_use_effective_value` |
@@ -1228,6 +1243,7 @@ Verified against code:
 14. **InMemorySaver** exists for tests (`open_checkpointer(in_memory=True)` / `in_memory_checkpointer`); CLI never uses it.
 15. **Owner canonical in mappings is the `Owner.name` string**, not `owner_id`; ingest maps name→id (`_owner_ids_by_name`). Unmapped owner names stay `owner_id=None`.
 16. **Coordinator answers totals itself** (has `get_total`/`summarize`) but **not** top merchants / search / largest — those are analyst-only among analysis tools.
+17. **Transaction override provenance is not precedence.** `set_transaction_category` writes `Transaction.category_override`; `transaction_overrides` only records provenance (`category`, `evidence_ids`, `plan_source`).
 
 ### Doc vs code discrepancy list (ground rule 1)
 

@@ -48,6 +48,13 @@ def _op_label(op: dict) -> str:
         return f"update mapping {op.get('mapping_id')} -> {op.get('canonical_value')!r}"
     if kind_of == "delete":
         return f"delete mapping {op.get('mapping_id')}"
+    if kind_of == "set_transaction_category":
+        return (
+            f"set transaction {op.get('transaction_id')} category -> "
+            f"{op.get('category')!r}"
+        )
+    if kind_of == "remove_transaction_override":
+        return f"remove transaction {op.get('transaction_id')} override"
     scope = f"account={op.get('account_id')}" if op.get("account_id") else "global"
     merchant = f"merchant={op.get('merchant')}" if op.get("merchant") else "all merchants"
     return (
@@ -88,7 +95,13 @@ def _print_interrupt(payload: dict) -> None:
     ops = payload.get("ops") or []
     preview = payload.get("preview") or {}
     impacts = {impact.get("index"): impact for impact in preview.get("ops") or []}
-    grouped: dict[str, list[int]] = {"update": [], "delete": [], "create": []}
+    grouped: dict[str, list[int]] = {
+        "update": [],
+        "delete": [],
+        "create": [],
+        "set_transaction_category": [],
+        "remove_transaction_override": [],
+    }
     for i, op in enumerate(ops):
         grouped.setdefault(op.get("op") or "create", []).append(i)
     conflicts = [
@@ -104,6 +117,8 @@ def _print_interrupt(payload: dict) -> None:
         ("Updates", "update"),
         ("Deletes", "delete"),
         ("Creates", "create"),
+        ("Set Overrides", "set_transaction_category"),
+        ("Remove Overrides", "remove_transaction_override"),
     ):
         conflict_set = set(conflicts)
         indexes = [i for i in (grouped.get(key) or []) if i not in conflict_set]
@@ -116,7 +131,8 @@ def _print_interrupt(payload: dict) -> None:
     print(
         f"Preview: scanned={preview.get('scanned')}  "
         f"would_change={preview.get('total_would_change')}  "
-        f"errors={preview.get('validation_errors')}"
+        f"errors={preview.get('validation_errors')}  "
+        f"overrides={preview.get('overrides')}"
     )
     print("Type: approve | reject | edit 0,2")
 

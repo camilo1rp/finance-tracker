@@ -23,7 +23,14 @@ from app.domain.classification import (
 )
 from app.domain.merged_lookup import MergedNormalizationLookup, RuleMatch, RuleSpec
 from app.domain.merchant import resolved_merchant
-from app.models import Account, NormalizationMapping, Owner, Transaction
+from app.models import (
+    Account,
+    NormalizationMapping,
+    Owner,
+    Transaction,
+    TransactionOverride,
+    effective_category,
+)
 from app.schemas import (
     ApplyResult,
     CreateMappingOp,
@@ -33,7 +40,10 @@ from app.schemas import (
     MappingPlanIn,
     MappingPreview,
     OpImpact,
+    OverridePreview,
+    RemoveTransactionOverrideOp,
     SampleChange,
+    SetTransactionCategoryOp,
     SkippedOp,
     UnmappedValuesOut,
     UpdateMappingOp,
@@ -43,6 +53,7 @@ from app.services.ingest_service import _backfill_merchant_raw, run_reclassifica
 
 _SAMPLE_CAP = 5
 _OpType = Literal["create", "update", "delete"]
+_OVERRIDE_OP_TYPES = {"set_transaction_category", "remove_transaction_override"}
 
 
 def _service_trace_inputs(inputs: dict) -> dict:
@@ -289,6 +300,66 @@ def _conflict_errors(accs: list[_OpAcc]) -> list[str]:
     return errors
 
 
+def _partition_ops(
+    ops: list[MappingOp],
+) -> tuple[list[MappingOp], list[SetTransactionCategoryOp | RemoveTransactionOverrideOp]]:
+    rule_ops: list[MappingOp] = []
+    override_ops: list[SetTransactionCategoryOp | RemoveTransactionOverrideOp] = []
+    for op in ops:
+        if isinstance(op, (SetTransactionCategoryOp, RemoveTransactionOverrideOp)):
+            override_ops.append(op)
+        else:
+            rule_ops.append(op)
+    return rule_ops, override_ops
+
+
+def preview_override_ops(
+    db: Session, ops: list[SetTransactionCategoryOp | RemoveTransactionOverrideOp]
+) -> list[OverridePreview]:
+    previews: list[OverridePreview] = []
+    for op in ops:
+        txn = db.get(Transaction, op.transaction_id)
+        if txn is None:
+            previews.append(
+                OverridePreview(
+                    transaction_id=op.transaction_id,
+                    exists=False,
+                    current_override=None,
+                    current_effective_category=None,
+                    proposed=op.category if isinstance(op, SetTransactionCategoryOp) else None,
+                    action="missing",
+                    evidence_ids=list(getattr(op, "evidence_ids", []) or []),
+                )
+            )
+            continue
+        current_effective = db.scalar(
+            select(effective_category).where(Transaction.id == txn.id)
+        )
+        if isinstance(op, SetTransactionCategoryOp):
+            proposed = op.category
+            if txn.category_override == proposed:
+                action = "noop"
+            elif txn.category_override is not None:
+                action = "replace_conflict"
+            else:
+                action = "set"
+        else:
+            proposed = None
+            action = "remove" if txn.category_override is not None else "remove_noop"
+        previews.append(
+            OverridePreview(
+                transaction_id=txn.id,
+                exists=True,
+                current_override=txn.category_override,
+                current_effective_category=current_effective,
+                proposed=proposed,
+                action=action,
+                evidence_ids=list(getattr(op, "evidence_ids", []) or []),
+            )
+        )
+    return previews
+
+
 def _db_specs(rows: list[NormalizationMapping]) -> list[RuleSpec]:
     return [_spec_from_row(row, ref=f"db:{row.id}") for row in rows]
 
@@ -452,12 +523,17 @@ def _classify_row(
 @traceable(process_inputs=_service_trace_inputs)
 def preview_mappings(db: Session, plan: MappingPlanIn) -> MappingPreview:
     """Recompute classification under the plan's virtual rule set. Read-only."""
-    accs, validation_errors = parse_plan_ops(db, plan)
+    rule_ops, override_ops = _partition_ops(plan.ops)
+    accs, validation_errors = parse_plan_ops(
+        db, MappingPlanIn(ops=rule_ops, account_id=plan.account_id)
+    )
+    override_preview = preview_override_ops(db, override_ops)
     if not accs:
         return MappingPreview(
             scanned=0,
             total_would_change=0,
             ops=[],
+            overrides=override_preview,
             validation_errors=validation_errors,
         )
 
@@ -495,6 +571,7 @@ def preview_mappings(db: Session, plan: MappingPlanIn) -> MappingPreview:
         scanned=len(rows),
         total_would_change=len(changed_ids),
         ops=impacts,
+        overrides=override_preview,
         validation_errors=validation_errors,
     )
 
@@ -689,11 +766,46 @@ class MappingPlanValidationError(ValueError):
         super().__init__("; ".join(errors))
 
 
+def _override_conflict_errors(
+    db: Session,
+    ops: list[SetTransactionCategoryOp | RemoveTransactionOverrideOp],
+) -> list[str]:
+    errors: list[str] = []
+    simulated: dict[int, str | None] = {}
+    for index, op in enumerate(ops, start=1):
+        label = f"op {index}"
+        txn = db.get(Transaction, op.transaction_id)
+        if txn is None:
+            errors.append(f"{label}: transaction {op.transaction_id} not found")
+            continue
+        current_override = simulated.get(op.transaction_id, txn.category_override)
+        if isinstance(op, SetTransactionCategoryOp):
+            if not op.category.strip():
+                errors.append(f"{label}: category is empty")
+                continue
+            if current_override is not None and current_override != op.category:
+                errors.append(
+                    f"{label}: transaction {op.transaction_id} has category_override "
+                    f"{current_override!r}, proposed {op.category!r}"
+                )
+                continue
+            simulated[op.transaction_id] = op.category
+        else:
+            simulated[op.transaction_id] = None
+    return errors
+
+
 @traceable(process_inputs=_service_trace_inputs)
 def apply_mapping_plan(db: Session, plan: MappingPlanIn) -> ApplyResult:
     """Apply approved ops and reclassify. Commits once; rolls back on failure."""
-    accs, errors = parse_plan_ops(db, plan, allow_missing_delete=True)
+    rule_ops, override_ops = _partition_ops(plan.ops)
+    accs, errors = parse_plan_ops(
+        db,
+        MappingPlanIn(ops=rule_ops, account_id=plan.account_id),
+        allow_missing_delete=True,
+    )
     errors.extend(_conflict_errors(accs))
+    errors.extend(_override_conflict_errors(db, override_ops))
     if errors:
         raise MappingPlanValidationError(errors)
 
@@ -701,6 +813,8 @@ def apply_mapping_plan(db: Session, plan: MappingPlanIn) -> ApplyResult:
     updated_ids: list[int] = []
     deleted_ids: list[int] = []
     skipped: list[SkippedOp] = []
+    overrides_set = 0
+    overrides_removed = 0
     pending: list[NormalizationMapping] = []
     try:
         for acc in accs:
@@ -756,6 +870,46 @@ def apply_mapping_plan(db: Session, plan: MappingPlanIn) -> ApplyResult:
         db.flush()
         created_ids = [row.id for row in pending]
 
+        for op in override_ops:
+            txn = db.get(Transaction, op.transaction_id)
+            if txn is None:
+                raise MappingPlanValidationError(
+                    [f"transaction {op.transaction_id} not found"]
+                )
+            provenance = db.execute(
+                select(TransactionOverride).where(
+                    TransactionOverride.transaction_id == txn.id
+                )
+            ).scalar_one_or_none()
+            if isinstance(op, SetTransactionCategoryOp):
+                if txn.category_override == op.category:
+                    skipped.append(SkippedOp(op=op, reason="duplicate"))
+                    continue
+                txn.category_override = op.category
+                if provenance is None:
+                    provenance = TransactionOverride(
+                        transaction_id=txn.id,
+                        category=op.category,
+                        evidence_ids=list(op.evidence_ids),
+                        plan_source=None,
+                    )
+                    db.add(provenance)
+                else:
+                    provenance.category = op.category
+                    provenance.evidence_ids = list(op.evidence_ids)
+                    provenance.plan_source = None
+                overrides_set += 1
+                continue
+            if txn.category_override is None:
+                skipped.append(SkippedOp(op=op, reason="missing"))
+                continue
+            txn.category_override = None
+            if provenance is not None:
+                db.delete(provenance)
+                db.flush()
+            overrides_removed += 1
+        db.flush()
+
         reclass = run_reclassification(db, account_id=plan.account_id)
         db.flush()
         unmapped = unmapped_summary(db)
@@ -769,6 +923,8 @@ def apply_mapping_plan(db: Session, plan: MappingPlanIn) -> ApplyResult:
         updated_ids=updated_ids,
         deleted_ids=deleted_ids,
         skipped=skipped,
+        overrides_set=overrides_set,
+        overrides_removed=overrides_removed,
         reclass_scanned=reclass.scanned,
         reclass_updated=reclass.updated,
         unmapped_after=UnmappedValuesOut(

@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Annotated, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 
 # ---- Owners ----
@@ -65,15 +65,51 @@ class DeleteMappingOp(BaseModel):
     mapping_id: int
 
 
+class SetTransactionCategoryOp(BaseModel):
+    op: Literal["set_transaction_category"] = "set_transaction_category"
+    transaction_id: int
+    category: str
+    evidence_ids: list[int] = []
+    rationale: Optional[str] = None
+
+    @field_validator("category")
+    @classmethod
+    def _category_not_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("category must not be empty")
+        return value
+
+
+class RemoveTransactionOverrideOp(BaseModel):
+    op: Literal["remove_transaction_override"] = "remove_transaction_override"
+    transaction_id: int
+    rationale: Optional[str] = None
+
+
 MappingOp = Annotated[
-    Union[CreateMappingOp, UpdateMappingOp, DeleteMappingOp],
+    Union[
+        CreateMappingOp,
+        UpdateMappingOp,
+        DeleteMappingOp,
+        SetTransactionCategoryOp,
+        RemoveTransactionOverrideOp,
+    ],
     Field(discriminator="op"),
 ]
 _MAPPING_OP_ADAPTER = TypeAdapter(MappingOp)
 
 
 def parse_mapping_op(data: MappingOp | dict) -> MappingOp:
-    if isinstance(data, (CreateMappingOp, UpdateMappingOp, DeleteMappingOp)):
+    if isinstance(
+        data,
+        (
+            CreateMappingOp,
+            UpdateMappingOp,
+            DeleteMappingOp,
+            SetTransactionCategoryOp,
+            RemoveTransactionOverrideOp,
+        ),
+    ):
         return data
     return _MAPPING_OP_ADAPTER.validate_python(data)
 
@@ -116,10 +152,21 @@ class OpImpact(BaseModel):
     samples: list[SampleChange] = []
 
 
+class OverridePreview(BaseModel):
+    transaction_id: int
+    exists: bool
+    current_override: Optional[str] = None
+    current_effective_category: Optional[str] = None
+    proposed: Optional[str] = None
+    action: Literal["set", "replace_conflict", "noop", "remove", "remove_noop", "missing"]
+    evidence_ids: list[int] = []
+
+
 class MappingPreview(BaseModel):
     scanned: int
     total_would_change: int
     ops: list[OpImpact]
+    overrides: list[OverridePreview] = []
     validation_errors: list[str]
 
 
@@ -192,6 +239,8 @@ class ApplyResult(BaseModel):
     updated_ids: list[int]
     deleted_ids: list[int]
     skipped: list[SkippedOp]
+    overrides_set: int = 0
+    overrides_removed: int = 0
     reclass_scanned: int
     reclass_updated: int
     unmapped_after: UnmappedValuesOut
