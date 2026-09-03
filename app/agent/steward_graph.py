@@ -16,6 +16,7 @@ from app.services.mapping_preview_service import apply_mapping_plan, preview_map
 
 STEWARD_PROMPT = """You clean up normalization mappings.
 Workflow: fetch unmapped values → list_mappings for the kind (global, plus the account scope if relevant) → inspect examples → propose ops → always preview before submitting → submit the plan with the preview attached.
+Rules may be global or scoped to an account; category rules may also be scoped to a merchant. Propose ops and submit plans that match the scope the user requested.
 Never claim anything was applied; applying happens only after a human approves.
 
 If preview reports conflicts_with_existing_id, submit an update on that mapping_id — never resubmit the create. Collapsing near-duplicate canonicals (e.g. Grocery/Groceries) is an update on the existing rule plus creates for other raw keys.

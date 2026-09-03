@@ -63,9 +63,10 @@ def make_subagent_tools(*, analyst, steward):
     @tool(
         "run_data_steward",
         description=(
-            "Delegate normalization cleanup: reviewing unmapped values, proposing/"
-            "previewing mapping rules, applying them after human approval. This tool "
-            "may pause the whole conversation for approval."
+            "Delegate normalization cleanup for types, categories, owners, and merchants — "
+            "including account- or merchant-scoped rules when the user asks. Reviews unmapped "
+            "values, proposes and previews mapping changes, and pauses for human approval "
+            "before anything is applied."
         ),
     )
     def run_data_steward(task: str) -> str:
