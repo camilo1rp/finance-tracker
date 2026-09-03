@@ -12,3 +12,4 @@ langgraph>=1.0,<2
 langgraph-checkpoint-postgres
 langgraph-checkpoint-sqlite
 langchain-anthropic
+langchain-openai

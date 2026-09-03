@@ -6,7 +6,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
+from dotenv import load_dotenv
 from sqlalchemy.orm import Session, sessionmaker
+
+load_dotenv()
 
 _session_factory: sessionmaker[Session] | None = None
 
