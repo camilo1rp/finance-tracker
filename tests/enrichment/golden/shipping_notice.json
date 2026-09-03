@@ -1,0 +1,25 @@
+{
+  "message": {
+    "ref": {
+      "message_id": "ship-1",
+      "thread_id": "t-ship",
+      "sender": "shipping@example.com",
+      "subject": "Your package is on the way",
+      "received_at": "2024-06-05T08:00:00",
+      "snippet": "Shipping notice"
+    },
+    "body_text": "Shipment for Order #SHP-12345\nExpected delivery 2024-06-06",
+    "headers": {
+      "from": "shipping@example.com",
+      "subject": "Your package is on the way"
+    },
+    "attachments": [],
+    "truncated": false
+  },
+  "expected": {
+    "order_id": "SHP-12345",
+    "order_date": "2024-06-06",
+    "total": null,
+    "extractor_version": "regex-0"
+  }
+}

@@ -2,7 +2,12 @@ from datetime import datetime
 from decimal import Decimal
 
 from app.domain.email_source import EmailMessage, EmailRef
-from app.domain.receipts import LineItem, ReceiptExtraction, receipt_extraction_dump
+from app.domain.receipt_extractors import _extract_trace_inputs, _extract_trace_outputs
+from app.domain.receipts import (
+    LineItem,
+    ReceiptExtraction,
+    receipt_extraction_dump,
+)
 from app.services.enrichment_service import _enrichment_trace_inputs, _enrichment_trace_outputs
 
 
@@ -34,3 +39,8 @@ def test_tracing_redacts_email_content() -> None:
     assert inputs["message"]["headers"] == "<redacted>"
     assert outputs["extraction"]["line_items"][0]["description"] == "<redacted>"
     assert "body_text" not in receipt_extraction_dump(extraction)
+
+    model_inputs = _extract_trace_inputs({"message": message, "known_categories": ["Dining"]})
+    model_outputs = _extract_trace_outputs(extraction)
+    assert model_inputs["message"]["body_text"] == "<redacted>"
+    assert model_outputs["line_items"][0]["description"] == "<redacted>"

@@ -98,9 +98,19 @@ def email_source_from_env():
 
 
 def extractor_from_env():
+    from langchain.chat_models import init_chat_model
+
+    from app.domain.receipt_extractors import ModelReceiptExtractor
     from app.domain.receipts import RegexReceiptExtractor
 
-    return RegexReceiptExtractor()
+    model = extraction_model_name()
+    if not model:
+        return RegexReceiptExtractor()
+    return ModelReceiptExtractor(
+        init_chat_model(model),
+        model_name=model,
+        body_byte_cap=email_body_byte_cap(),
+    )
 
 
 def set_session_factory(factory: sessionmaker[Session] | None) -> None:

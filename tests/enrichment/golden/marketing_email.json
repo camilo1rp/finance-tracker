@@ -1,0 +1,25 @@
+{
+  "message": {
+    "ref": {
+      "message_id": "market-1",
+      "thread_id": "t-market",
+      "sender": "promo@example.com",
+      "subject": "Weekend deals just for you",
+      "received_at": "2024-06-06T11:00:00",
+      "snippet": "Promo"
+    },
+    "body_text": "Save big this weekend. No purchase necessary.",
+    "headers": {
+      "from": "promo@example.com",
+      "subject": "Weekend deals just for you"
+    },
+    "attachments": [],
+    "truncated": false
+  },
+  "expected": {
+    "order_id": null,
+    "order_date": null,
+    "total": null,
+    "extractor_version": "regex-0"
+  }
+}

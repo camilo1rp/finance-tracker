@@ -1,0 +1,25 @@
+{
+  "message": {
+    "ref": {
+      "message_id": "amazon-1",
+      "thread_id": "t-amazon",
+      "sender": "orders@amazon.com",
+      "subject": "Your Amazon.com order #A123-4567890-1234567",
+      "received_at": "2024-06-02T12:00:00",
+      "snippet": "Amazon order"
+    },
+    "body_text": "Order #A123-4567890-1234567\nOrder Date: 2024-06-02\nItem 1 $12.99\nItem 2 $45.00\nTotal $57.99",
+    "headers": {
+      "from": "orders@amazon.com",
+      "subject": "Your Amazon.com order #A123-4567890-1234567"
+    },
+    "attachments": [],
+    "truncated": false
+  },
+  "expected": {
+    "order_id": "A123-4567890-1234567",
+    "order_date": "2024-06-02",
+    "total": "57.99",
+    "extractor_version": "regex-0"
+  }
+}

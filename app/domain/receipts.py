@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 import re
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.domain.classification import clean_raw_value
 from app.domain.email_source import EmailMessage
@@ -28,16 +30,18 @@ SEED_SENDERS: dict[str, list[str]] = {
 }
 
 
-@dataclass(frozen=True)
-class LineItem:
+class LineItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     description: str
     quantity: Decimal | None = None
     amount: Decimal | None = None
     category_hint: str | None = None
 
 
-@dataclass(frozen=True)
-class ReceiptExtraction:
+class ReceiptExtraction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     merchant_name: str | None = None
     order_id: str | None = None
     order_date: date | None = None
@@ -46,7 +50,7 @@ class ReceiptExtraction:
     subtotal: Decimal | None = None
     tax: Decimal | None = None
     shipping: Decimal | None = None
-    line_items: list[LineItem] = field(default_factory=list)
+    line_items: list[LineItem] = Field(default_factory=list)
     payment_hint: str | None = None
     extractor_version: str = "unknown"
     raw_confidence: float = 0.0
@@ -204,8 +208,7 @@ def match_receipt(
 
 
 def receipt_extraction_dump(extraction: ReceiptExtraction) -> dict:
-    data = asdict(extraction)
-    return _json_safe(data)
+    return extraction.model_dump(mode="json")
 
 
 def _json_safe(value):

@@ -18,9 +18,12 @@ from app.domain.receipts import (
 
 def test_dominant_line_item_cases() -> None:
     assert dominant_line_item([]) is None
-    assert dominant_line_item([LineItem("a"), LineItem("b")]) is None
+    assert dominant_line_item([LineItem(description="a"), LineItem(description="b")]) is None
     tied = dominant_line_item(
-        [LineItem("first", amount=Decimal("10.00")), LineItem("second", amount=Decimal("10.00"))]
+        [
+            LineItem(description="first", amount=Decimal("10.00")),
+            LineItem(description="second", amount=Decimal("10.00")),
+        ]
     )
     assert tied is not None
     assert tied.description == "first"
