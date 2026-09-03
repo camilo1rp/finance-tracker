@@ -1,0 +1,14 @@
+{
+  "id": "msg_test_html_01",
+  "snippet": "HTML only receipt.",
+  "subject": "HTML receipt",
+  "sender": "orders@example-shop.test",
+  "toRecipients": ["buyer@example-user.test"],
+  "ccRecipients": [],
+  "date": "2024-06-02",
+  "plaintextBody": "",
+  "htmlBody": "<html><head><style>body{color:red}</style></head><body><script>alert(1)</script><p>Hello&nbsp;world</p><p>Line two &amp; more</p></body></html>",
+  "attachmentIds": [],
+  "attachments": [],
+  "labelIds": ["INBOX"]
+}

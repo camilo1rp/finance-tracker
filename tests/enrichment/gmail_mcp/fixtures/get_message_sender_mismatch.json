@@ -1,0 +1,14 @@
+{
+  "id": "msg_test_confirm_01",
+  "snippet": "Wrong sender payload.",
+  "subject": "Order confirmation",
+  "sender": "noreply@other-merchant.test",
+  "toRecipients": ["buyer@example-user.test"],
+  "ccRecipients": [],
+  "date": "2024-06-02",
+  "plaintextBody": "This sender does not match the search ref.",
+  "htmlBody": "",
+  "attachmentIds": [],
+  "attachments": [],
+  "labelIds": ["INBOX"]
+}

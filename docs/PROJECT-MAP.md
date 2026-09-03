@@ -8,11 +8,11 @@ Planning reference for `finance-tracker-skeleton`. Derived from source and tests
 |---|---|
 | Generated | 2026-09-03 |
 | Branch | `main` |
-| HEAD SHA | (post observability slice) |
-| Working tree | LangSmith tracing + LangGraph Studio entrypoints |
+| HEAD SHA | (post Gmail MCP adapter) |
+| Working tree | Email enrichment + Gmail MCP adapter |
 | Python (venv) | 3.14.5 (Studio requires ≥3.11 and &lt;3.14; use Dockerfile 3.12 or a 3.11–3.13 venv) |
 | Dockerfile base | `python:3.12-slim` |
-| Tests | **119 passed** (`pytest -q`) |
+| Tests | **199 passed**, 1 deselected (`live_gmail`) (`pytest -q`) |
 
 ### Reconciled counts
 
@@ -22,7 +22,7 @@ Planning reference for `finance-tracker-skeleton`. Derived from source and tests
 | Tables | **5** (`owners`, `accounts`, `normalization_mappings`, `import_batches`, `transactions`) |
 | Agent tools | **14** (12 read / 2 gate-or-delegate; **0** DB-apply tools) |
 | Graphs in `langgraph.json` | **3** (`coordinator`, `steward`, `analyst`) |
-| Tests passing | **119** |
+| Tests passing | **199** (+ 1 deselected `live_gmail`) |
 
 ### Versions
 
@@ -46,8 +46,10 @@ Pinned in `requirements.txt` (ranges/unpinned) vs installed in `.venv`:
 | pydantic-settings | unpinned | 2.15.0 |
 | psycopg | `psycopg[binary]` | 3.3.4 |
 | pytest | unpinned | 9.1.1 |
+| httpx | `==0.28.1` | 0.28.1 |
+| mcp | `==1.29.1` | 1.29.1 |
 
-Also installed (used, not in the required version table): `langchain-core==1.6.1`, `python-dotenv==1.2.3` (not in `requirements.txt`; pulled via `pydantic-settings`), `pandas==3.0.5`, `httpx==0.28.1`.
+Also installed (used, not in the required version table): `langchain-core==1.6.1`, `python-dotenv==1.2.3` (not in `requirements.txt`; pulled via `pydantic-settings`), `pandas==3.0.5`.
 
 ---
 
@@ -71,7 +73,7 @@ Regenerated from disk. One-line purpose each.
 
 ```
 finance-tracker-skeleton/
-├── .env.example                 # DATABASE_URL, STEWARD_MODEL, AGENT_CHECKPOINT_PATH, LANGSMITH_* (commented)
+├── .env.example                 # DATABASE_URL, agent/enrichment, Gmail MCP, LANGSMITH_* (commented)
 ├── .gitignore                   # venv, pytest cache, .env, sqlite checkpoints
 ├── AGENT-QA.md                  # live-model CLI sitting (may be stale)
 ├── Dockerfile                   # python:3.12-slim; pip install; uvicorn app.main:app
@@ -82,8 +84,8 @@ finance-tracker-skeleton/
 ├── STRUCTURE.md                 # tree + agent notes
 ├── requirements-dev.txt         # langgraph-cli[inmem] for Studio
 ├── docker-compose.yml           # postgres:16 + api (uvicorn --reload :8000)
-├── pytest.ini                   # pythonpath=., testpaths=tests
-├── requirements.txt             # Python deps (mostly unpinned)
+├── pytest.ini                   # pythonpath=., testpaths=tests; addopts deselects live_gmail
+├── requirements.txt             # Python deps; mcp==1.29.1, httpx==0.28.1 pinned
 ├── app/__init__.py              # empty
 ├── app/main.py                  # FastAPI factory, router mount, GET /health
 ├── app/config.py                # Settings.database_url from env
@@ -100,10 +102,18 @@ finance-tracker-skeleton/
 ├── app/domain/db_lookup.py      # DbNormalizationLookup + merged_lookup_from_db
 ├── app/domain/merged_lookup.py  # in-memory lookup over RuleSpec list
 ├── app/domain/merchant.py       # extract_merchant, resolved_merchant
+├── app/domain/email_source.py   # EmailSource port, allowlist, FixtureEmailSource
+├── app/domain/receipts.py       # receipt models, matcher, RegexReceiptExtractor (no langchain)
+├── app/domain/receipt_extractors.py  # ModelReceiptExtractor (langchain structured output)
+├── app/integrations/gmail_mcp/auth.py       # TokenProvider, static + refresh
+├── app/integrations/gmail_mcp/transport.py  # McpTransport, streamable-HTTP, 3-tool allowlist
+├── app/integrations/gmail_mcp/mapping.py    # Gmail query builder + Message mapping
+├── app/integrations/gmail_mcp/source.py     # McpEmailSource adapter
 ├── app/services/__init__.py     # empty
 ├── app/services/ingest_service.py
 ├── app/services/analytics_service.py
 ├── app/services/mapping_preview_service.py
+├── app/services/enrichment_service.py
 ├── app/routers/__init__.py      # empty
 ├── app/routers/accounts.py
 ├── app/routers/owners.py
@@ -125,13 +135,16 @@ finance-tracker-skeleton/
 ├── app/agent/tools/steward.py   # preview_mapping_rules, submit_plan (no apply)
 ├── app/agent/tools/subagents.py # ask_analyst, run_data_steward wrappers
 ├── scripts/verify_api.py        # HTTP walkthrough (TestClient or --base-url)
+├── scripts/gmail_mcp_spike.py   # owner-run live Gmail MCP probe (redacts before disk)
 ├── scripts/fixtures/*.csv       # Chase/Apple/dirty/dupes/sign_only sample files
+├── docs/email-enrichment/GMAIL-SETUP.md  # Developer Preview enrollment + live checklist
 ├── tests/conftest.py            # SQLite engine, client, tracing disabled (autouse)
 ├── tests/test_tracing_isolation.py
-├── tests/fakes.py               # InMemoryNormalizationLookup
+├── tests/fakes.py               # InMemoryNormalizationLookup, FakeEmailSource, FakeMcpTransport
 ├── tests/test_smoke.py          # health, docs, tables
 ├── tests/agent/helpers.py       # ScriptedChatModel, seed, capture_apply
-└── tests/{domain,routers,services,agent}/test_*.py
+├── tests/enrichment/gmail_mcp/  # mapping/transport/source tests + synthetic fixtures
+└── tests/{domain,routers,services,agent,enrichment}/test_*.py
 ```
 
 ### STRUCTURE.md vs disk
@@ -731,7 +744,9 @@ Email enrichment is a deterministic, no-network/no-LLM path in Part A. It writes
 
 **`seed_merchant_senders(db) -> int`** — idempotently seeds domain-only senders for Amazon, Apple, Uber, Lyft, Netflix, Spotify, Google, Microsoft with `origin="seed"`.
 
-**Tracing:** `find_candidates` and `enrich_transaction` use `@traceable(process_inputs=_enrichment_trace_inputs, process_outputs=_enrichment_trace_outputs)`. Strippers drop `db` / `source` / `extractor` and redact `EmailMessage.body_text`, `EmailRef.snippet`, email headers, and receipt line-item descriptions.
+**Tracing:** `find_candidates` and `enrich_transaction` use `@traceable(process_inputs=_enrichment_trace_inputs, process_outputs=_enrichment_trace_outputs)`. Strippers drop `db` / `source` / `extractor` and redact `EmailMessage.body_text`, `EmailRef.snippet`, email headers, `EmailQuery.text_hints`, and receipt line-item descriptions.
+
+No new service module was added for the Gmail adapter. Transport/mapping/adapter live under `app/integrations/gmail_mcp/`; enrichment still goes through `enrichment_service.py`.
 
 ---
 
@@ -1111,6 +1126,7 @@ CLI (`app/agent/cli.py::_decision`): `reject*` → `{"decision":"reject","ops":[
 | 13.4 | Raw email content never reaches a DB row, trace, or log; traces of enrichment functions carry redacted inputs/outputs. | Privacy | `_enrichment_trace_inputs` / `_enrichment_trace_outputs` | `tests/enrichment/test_enrichment_tracing.py` |
 | 13.5 | `EmailSource.search` outside the allowlist returns empty without contacting the provider; `fetch` re-validates both the ref sender and the fetched sender. | Scope enforcement independent of caller correctness | `AllowlistedEmailSource` | `tests/enrichment/test_allowlist.py` |
 | 13.6 | Preview output for rule-only plans is unchanged except for the additive `overrides=[]` key. | Existing consumers keep working | `preview_mappings` | `tests/services/test_override_preview.py::test_rule_only_preview_keeps_existing_shape_plus_empty_overrides` |
+| 13.7 | The Gmail adapter can invoke only `search_threads`, `get_message`, `list_labels`, enforced in `transport.py` before any network call. | Write-capable Gmail tools are unreachable by construction | `app/integrations/gmail_mcp/transport.py::ALLOWED_TOOLS` | `tests/enrichment/gmail_mcp/test_transport.py` |
 | 14 | Type/owner recompute gated on `raw_type` / `owner_raw` | Sign-derived and default-owner rows stay | `run_reclassification`; preview `_rule_in_scope` | `test_preview_gates` |
 | 15 | `spend_only` totals use `abs(amount)` and SPEND only | Mixed-sign CSVs | `_amount_expr`, `_apply_filters` | `test_spend_only_excludes_payments_and_refunds`, `test_mixed_sign_spends_use_abs` |
 | 16 | Effective category/merchant coalesce override > normalized > raw | Analytics + list filters | SQL case + `resolved_merchant` | `test_summarize_category_coalesce_override_wins`, `test_merchant_filter_and_group_by_use_effective_value` |
@@ -1144,10 +1160,16 @@ Never read `.env` values into this document. Names from `.env.example` and code:
 | `EMAIL_LOOKAHEAD_DAYS` | Candidate search lookahead window | `7` | `app/agent/cli.py::_run_enrich` / `EnrichmentConfig` |
 | `EMAIL_MAX_RESULTS_PER_SEARCH` | Cap passed to `EmailQuery.max_results` | `10` | `app/services/enrichment_service.py::find_candidates` |
 | `EMAIL_MAX_CANDIDATES` | Max fetched candidates per transaction | `5` | `EnrichmentConfig.max_candidates` |
-| `EMAIL_BODY_BYTE_CAP` | Adapter body-text truncation cap | `65536` | `FixtureEmailSource` today; future adapters too |
+| `EMAIL_BODY_BYTE_CAP` | Adapter body-text truncation cap | `65536` | `FixtureEmailSource` and `McpEmailSource` |
 | `ENRICHMENT_CONFIDENCE_THRESHOLD` | Reserved config for Task 03 decisioning | `0.8` | `app/agent/config.py::enrichment_confidence_threshold` |
 | `EMAIL_FAKE_FIXTURE` | JSON fixture path used when `EMAIL_PROVIDER=fake` | none | `app/agent/config.py::email_source_from_env` |
 | `EXTRACTION_MODEL` | Empty keeps the regex extractor fallback; non-empty builds `ModelReceiptExtractor` independently of `STEWARD_MODEL` | empty string | `app/agent/config.py::extraction_model_name` / `extractor_from_env` |
+| `EMAIL_MCP_URL` | Gmail MCP endpoint | `https://gmailmcp.googleapis.com/mcp/v1` | `email_mcp_url` / `StreamableHttpMcpTransport` |
+| `EMAIL_MCP_TIMEOUT_S` | Per-call MCP timeout | `20` | `email_mcp_timeout_s` |
+| `EMAIL_MCP_ACCESS_TOKEN` | Static bearer token; if set, `StaticTokenProvider` wins | empty | `token_provider_from_env` |
+| `GMAIL_OAUTH_CLIENT_ID` | OAuth Desktop client id for refresh flow | empty | `RefreshTokenProvider` |
+| `GMAIL_OAUTH_CLIENT_SECRET` | OAuth Desktop client secret | empty | `RefreshTokenProvider` |
+| `GMAIL_OAUTH_REFRESH_TOKEN` | Offline refresh token (`gmail.readonly` only) | empty | `RefreshTokenProvider` |
 | `ANTHROPIC_API_KEY` | Provider SDK (comment in `.env.example`) | none | not referenced in app code |
 | `OPENAI_API_KEY` | Provider SDK if `STEWARD_MODEL` is `openai:...` | none | not referenced in app code |
 | `LANGSMITH_TRACING` | Enable LangSmith tracing (SDK reads; app code does not) | unset / false | LangChain/LangGraph/LangSmith SDK |
@@ -1165,7 +1187,7 @@ Optional `LANGSMITH_*` vars documented in `.env.example`; `Settings` uses `extra
 
 **`Dockerfile`:** install requirements, copy `app/` only, `uvicorn app.main:app --host 0.0.0.0 --port 8000` (no reload).
 
-**`pytest.ini`:** `pythonpath = .`, `testpaths = tests`.
+**`pytest.ini`:** `pythonpath = .`, `testpaths = tests`, `addopts = -m "not live_gmail"`, marker `live_gmail`.
 
 **`langgraph.json`:** repo root; three graphs via `app/agent/studio.py` factories; `"dependencies": ["."]`; `"env": ".env"`. Studio Python guard: ≥3.11, &lt;3.14.
 
@@ -1185,24 +1207,26 @@ Optional `LANGSMITH_*` vars documented in `.env.example`; `Settings` uses `extra
 | `find_candidates` | `app/services/enrichment_service.py` |
 | `enrich_transaction` | `app/services/enrichment_service.py` |
 | `ModelReceiptExtractor.extract` | `app/domain/receipt_extractors.py` |
+| `McpEmailSource.search` / `fetch` / `health` | `app/integrations/gmail_mcp/source.py` |
 
 **First trace to read:** steward approval — `preview_mappings` span → interrupt gap → `apply_mapping_plan` + `run_reclassification` with `reclass_updated`.
 
 **Studio:** `make studio` → `langgraph dev` on `:2024`. Graphs: `coordinator`, `steward`, `analyst`. Dev server uses in-memory persistence; CLI checkpointer unaffected. Chrome: allow local network access for `smith.langchain.com`.
 
-**Privacy:** enrichment traces redact `EmailMessage.body_text`, `EmailRef.snippet`, email headers, and `ReceiptExtraction.line_items[].description`. `TransactionEvidence.extraction` stores only the structured receipt payload and never a `body_text` field. `LANGSMITH_HIDE_INPUTS` / `LANGSMITH_HIDE_OUTPUTS` still hide whole payloads when enabled.
+**Privacy:** enrichment traces redact `EmailMessage.body_text`, `EmailRef.snippet`, email headers, `EmailQuery.text_hints`, quoted phrases in the built Gmail query, and `ReceiptExtraction.line_items[].description`. Transport RPC calls are not traced individually. `TransactionEvidence.extraction` stores only the structured receipt payload and never a `body_text` field. `LANGSMITH_HIDE_INPUTS` / `LANGSMITH_HIDE_OUTPUTS` still hide whole payloads when enabled.
 
 ---
 
 ## 12. Testing strategy
 
-Run: `.venv/bin/python -m pytest` (162 passed). `scripts/verify_api.py` is a separate HTTP walkthrough, not pytest.
+Run: `.venv/bin/python -m pytest` (199 passed, 1 deselected `live_gmail`). `scripts/verify_api.py` is a separate HTTP walkthrough, not pytest.
 
 | Suite | Covers | Fixtures / fakes |
 |---|---|---|
 | `tests/test_smoke.py` | `/health`, `/docs`, eight tables exist | `client`, `db_session` |
 | `tests/domain/` | mapping validation, resolve placeholder, CSV source, parse/classify/merchant/dedupe, merged vs DB lookup | `InMemoryNormalizationLookup` (`tests/fakes.py`) |
-| `tests/enrichment/` | allowlist enforcement, deterministic receipt matching, enrichment persistence/rollback, trace redaction, enrichment CLI, model extractor behavior, synthetic golden emails for regex fallback | `FakeEmailSource`, `FakeExtractor`, fake structured-output model, shared SQLite |
+| `tests/enrichment/` | allowlist enforcement, deterministic receipt matching, enrichment persistence/rollback, trace redaction (including Gmail adapter strippers), enrichment CLI, model extractor behavior, synthetic golden emails for regex fallback | `FakeEmailSource`, `FakeExtractor`, fake structured-output model, shared SQLite |
+| `tests/enrichment/gmail_mcp/` | query builder, mapping, adapter, transport error mapping, env factory; synthetic Gmail MCP fixtures only | `FakeMcpTransport`; fixtures under `tests/enrichment/gmail_mcp/fixtures/` |
 | `tests/routers/` | HTTP contracts, import+dedupe+patch, reclassify gates, analytics aliases/filters, mapping CRUD/preview/apply | TestClient + shared SQLite |
 | `tests/services/` | preview purity/gates/shadow/conflict; apply txn/idempotency/conflicts | direct service calls |
 | `tests/agent/` | scripted graphs, interrupt/resume, CLI parse/config, middleware, coordinator routing, Studio entrypoints | `ScriptedChatModel`, `agent_sessions`, `seed_coffee`, `capture_apply` |
@@ -1213,7 +1237,7 @@ Run: `.venv/bin/python -m pytest` (162 passed). `scripts/verify_api.py` is a sep
 
 **`tests/agent/helpers.py::ScriptedChatModel`:** `FakeMessagesListChatModel`; `bind_tools` returns `self`; `_generate` stays on the **last** scripted `AIMessage` once exhausted. Drives graphs **without an LLM**. `set_session_factory` points tools at the pytest engine.
 
-**Deliberately not covered:** live-model behavior, Postgres checkpointer, provider auth, concurrent imports, Alembic, chat UI. Studio smoke-tested via factory import (`test_studio_entrypoints`); full `langgraph dev` boot not in pytest.
+**Deliberately not covered:** live-model behavior, Postgres checkpointer, provider auth (except the optional `live_gmail` smoke, deselected by default), concurrent imports, Alembic, chat UI. Studio smoke-tested via factory import (`test_studio_entrypoints`); full `langgraph dev` boot not in pytest. Run the Gmail smoke with `pytest -o addopts= -m live_gmail` when env is configured.
 
 ---
 
@@ -1222,8 +1246,8 @@ Run: `.venv/bin/python -m pytest` (162 passed). `scripts/verify_api.py` is a sep
 | Deferred | What exists to plug into |
 |---|---|
 | New file/API sources | `TransactionSource.fetch(**kwargs)`; ingest already source-agnostic. Commented `PdfSource` / `ApiSource` in `sources.py`. `Account.source_format` string. |
-| Email providers | `app/domain/email_source.py::EmailSource` is the port; `AllowlistedEmailSource` centralizes allowlist intersection + fetch re-validation. `EMAIL_PROVIDER=gmail` is reserved for Task 02 and currently raises `NotImplementedError`. |
-| Receipt extractors | `app/domain/receipts.py::ReceiptExtractor` is the port. Part A ships `RegexReceiptExtractor` as the deterministic fallback and test baseline. |
+| Email providers | `app/domain/email_source.py::EmailSource` is the port; `AllowlistedEmailSource` centralizes allowlist intersection + fetch re-validation. `EMAIL_PROVIDER=gmail` builds `McpEmailSource`. `McpTransport` is the seam for a future Microsoft 365 adapter: implement `call_tool` / `list_tools` and a mapping module; do not widen `ALLOWED_TOOLS`. |
+| Receipt extractors | `app/domain/receipts.py::ReceiptExtractor` is the port. `RegexReceiptExtractor` is the deterministic fallback; `ModelReceiptExtractor` lives in `receipt_extractors.py` so domain modules stay free of langchain. |
 | Per-import mapping override | `resolve_mapping(..., override=)` currently ignores override. HTTP import has no override field. |
 | Alternate lookups | `NormalizationLookup` + fake in tests; preview uses `MergedNormalizationLookup`. |
 | Research agent | none. Would wrap like `ask_analyst` (task string, return last text, no parent history). Coordinator prompt would need a new tool. |
@@ -1255,6 +1279,7 @@ Verified against code:
 15. **Owner canonical in mappings is the `Owner.name` string**, not `owner_id`; ingest maps name→id (`_owner_ids_by_name`). Unmapped owner names stay `owner_id=None`.
 16. **Coordinator answers totals itself** (has `get_total`/`summarize`) but **not** top merchants / search / largest — those are analyst-only among analysis tools.
 17. **Transaction override provenance is not precedence.** `set_transaction_category` writes `Transaction.category_override`; `transaction_overrides` only records provenance (`category`, `evidence_ids`, `plan_source`).
+18. **Gmail `date` is day-precision.** The adapter sets `EmailRef.received_at` to midnight UTC and `received_at_precision="date"`. RFC `Message-ID` is not exposed, so `TransactionEvidence.external_ref` is `{provider}:{message id}` (`gmail:<id>`). Gmail `from:` is fuzzy, so the allowlist is re-applied after search.
 
 ### Doc vs code discrepancy list (ground rule 1)
 

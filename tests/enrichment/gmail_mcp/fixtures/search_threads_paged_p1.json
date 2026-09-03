@@ -1,0 +1,20 @@
+{
+  "threads": [
+    {
+      "id": "thread_test_p1",
+      "messages": [
+        {
+          "id": "msg_test_p1",
+          "snippet": "First page result.",
+          "subject": "Page one",
+          "sender": "orders@example-shop.test",
+          "toRecipients": ["buyer@example-user.test"],
+          "date": "2024-06-03",
+          "labelIds": ["INBOX"]
+        }
+      ]
+    }
+  ],
+  "nextPageToken": "token_test_page2",
+  "resultCountEstimate": 3
+}

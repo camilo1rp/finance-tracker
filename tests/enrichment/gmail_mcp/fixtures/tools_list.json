@@ -1,0 +1,98 @@
+{
+  "tools": [
+    {
+      "name": "search_threads",
+      "inputSchema": {
+        "properties": {
+          "query": {},
+          "pageSize": {},
+          "pageToken": {},
+          "includeTrash": {},
+          "view": {}
+        }
+      }
+    },
+    {
+      "name": "get_message",
+      "inputSchema": {
+        "properties": {
+          "messageId": {},
+          "messageFormat": {}
+        }
+      }
+    },
+    {
+      "name": "list_labels",
+      "inputSchema": {
+        "properties": {}
+      }
+    },
+    {
+      "name": "create_draft",
+      "inputSchema": {
+        "properties": {
+          "to": {},
+          "subject": {}
+        }
+      }
+    },
+    {
+      "name": "list_drafts",
+      "inputSchema": {
+        "properties": {}
+      }
+    },
+    {
+      "name": "get_thread",
+      "inputSchema": {
+        "properties": {
+          "threadId": {}
+        }
+      }
+    },
+    {
+      "name": "label_thread",
+      "inputSchema": {
+        "properties": {
+          "threadId": {},
+          "labelIds": {}
+        }
+      }
+    },
+    {
+      "name": "unlabel_thread",
+      "inputSchema": {
+        "properties": {
+          "threadId": {},
+          "labelIds": {}
+        }
+      }
+    },
+    {
+      "name": "label_message",
+      "inputSchema": {
+        "properties": {
+          "messageId": {},
+          "labelIds": {}
+        }
+      }
+    },
+    {
+      "name": "unlabel_message",
+      "inputSchema": {
+        "properties": {
+          "messageId": {},
+          "labelIds": {}
+        }
+      }
+    },
+    {
+      "name": "create_label",
+      "inputSchema": {
+        "properties": {
+          "name": {}
+        }
+      }
+    }
+  ]
+}

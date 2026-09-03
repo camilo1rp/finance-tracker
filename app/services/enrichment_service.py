@@ -37,6 +37,14 @@ def _enrichment_trace_outputs(outputs):
 
 
 def _redact_enrichment_value(value):
+    if isinstance(value, EmailQuery):
+        return {
+            "senders": list(value.senders),
+            "date_from": value.date_from.isoformat(),
+            "date_to": value.date_to.isoformat(),
+            "text_hints": ["<redacted>"] * len(value.text_hints),
+            "max_results": value.max_results,
+        }
     if isinstance(value, EmailMessage):
         return {
             "ref": _redact_enrichment_value(value.ref),
@@ -202,6 +210,14 @@ def _best_match(current: EvidenceMatch | None, candidate: EvidenceMatch) -> Evid
     return candidate if candidate_key > current_key else current
 
 
+def _source_provider(source: EmailSource) -> str:
+    return getattr(source, "provider", None) or source.health().provider
+
+
+def _evidence_external_ref(source: EmailSource, message: EmailMessage) -> str:
+    return f"{_source_provider(source)}:{message.ref.message_id}"
+
+
 def _upsert_evidence(
     db: Session,
     txn_id: int,
@@ -210,11 +226,12 @@ def _upsert_evidence(
     extraction: ReceiptExtraction,
     match: EvidenceMatch,
 ) -> TransactionEvidence:
+    external_ref = _evidence_external_ref(source, message)
     row = db.execute(
         select(TransactionEvidence).where(
             TransactionEvidence.transaction_id == txn_id,
             TransactionEvidence.kind == EvidenceKind.EMAIL_RECEIPT.value,
-            TransactionEvidence.external_ref == message.ref.message_id,
+            TransactionEvidence.external_ref == external_ref,
         )
     ).scalar_one_or_none()
     payload = receipt_extraction_dump(extraction)
@@ -222,8 +239,8 @@ def _upsert_evidence(
         row = TransactionEvidence(
             transaction_id=txn_id,
             kind=EvidenceKind.EMAIL_RECEIPT.value,
-            provider=source.health().provider,
-            external_ref=message.ref.message_id,
+            provider=_source_provider(source),
+            external_ref=external_ref,
             extraction=payload,
             match_kind=match.match_kind.value,
             confidence=match.confidence,
@@ -233,7 +250,7 @@ def _upsert_evidence(
         )
         db.add(row)
     else:
-        row.provider = source.health().provider
+        row.provider = _source_provider(source)
         row.extraction = payload
         row.match_kind = match.match_kind.value
         row.confidence = match.confidence

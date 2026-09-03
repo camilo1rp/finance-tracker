@@ -1,0 +1,14 @@
+{
+  "id": "msg_test_confirm_01",
+  "snippet": "Thanks for your order of the test widget.",
+  "subject": "Order confirmation",
+  "sender": "orders@example-shop.test",
+  "toRecipients": ["buyer@example-user.test"],
+  "ccRecipients": [],
+  "date": "2024-06-02",
+  "plaintextBody": "Order #TEST-1001\nTotal $25.00\nThank you for shopping with Example Shop.",
+  "htmlBody": "<p>ignored because plaintext is present</p>",
+  "attachmentIds": [],
+  "attachments": [],
+  "labelIds": ["INBOX"]
+}

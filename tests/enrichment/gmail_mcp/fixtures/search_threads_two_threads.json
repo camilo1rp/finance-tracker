@@ -1,0 +1,46 @@
+{
+  "threads": [
+    {
+      "id": "thread_test_aa",
+      "messages": [
+        {
+          "id": "msg_test_confirm_01",
+          "snippet": "Thanks for your order of the test widget.",
+          "subject": "Order confirmation",
+          "sender": "orders@example-shop.test",
+          "toRecipients": ["buyer@example-user.test"],
+          "ccRecipients": [],
+          "date": "2024-06-02",
+          "labelIds": ["INBOX"]
+        },
+        {
+          "id": "msg_test_ship_01",
+          "snippet": "Your test widget has shipped.",
+          "subject": "Shipping notice",
+          "sender": "orders@example-shop.test",
+          "toRecipients": ["buyer@example-user.test"],
+          "ccRecipients": [],
+          "date": "2024-05-20",
+          "labelIds": ["INBOX"]
+        }
+      ]
+    },
+    {
+      "id": "thread_test_bb",
+      "messages": [
+        {
+          "id": "msg_test_other_01",
+          "snippet": "A note from another merchant.",
+          "subject": "Unrelated note",
+          "sender": "alerts@other-merchant.test",
+          "toRecipients": ["buyer@example-user.test"],
+          "ccRecipients": [],
+          "date": "2024-06-02",
+          "labelIds": ["INBOX"]
+        }
+      ]
+    }
+  ],
+  "nextPageToken": null,
+  "resultCountEstimate": 2
+}

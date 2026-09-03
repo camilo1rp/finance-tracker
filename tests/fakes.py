@@ -11,6 +11,7 @@ from app.domain.email_source import (
     truncate_text_bytes,
 )
 from app.domain.receipts import ReceiptExtraction, ReceiptExtractor
+from app.integrations.gmail_mcp.transport import ALLOWED_TOOLS, McpTransport
 
 
 class InMemoryNormalizationLookup(NormalizationLookup):
@@ -70,6 +71,7 @@ class FakeEmailSource(AllowlistedEmailSource):
         super().__init__(allowlist)
         self._messages = {message.ref.message_id: message for message in messages}
         self._status = status or SourceStatus(available=True, provider="fake")
+        self.provider = self._status.provider
         self._byte_cap = byte_cap
         self.raise_unavailable = raise_unavailable
         self.search_calls = 0
@@ -117,6 +119,35 @@ class FakeEmailSource(AllowlistedEmailSource):
 
     def health(self) -> SourceStatus:
         return self._status
+
+
+class FakeMcpTransport(McpTransport):
+    def __init__(
+        self,
+        responses: dict[str, list[dict]],
+        fail_with: Exception | None = None,
+        tools: list[str] | None = None,
+    ) -> None:
+        self.responses = {name: list(payloads) for name, payloads in responses.items()}
+        self.fail_with = fail_with
+        self.calls: list[tuple[str, dict]] = []
+        self.tools = list(tools) if tools is not None else sorted(ALLOWED_TOOLS)
+
+    def list_tools(self) -> list[str]:
+        if self.fail_with is not None:
+            raise self.fail_with
+        return list(self.tools)
+
+    def call_tool(self, name: str, arguments: dict) -> dict:
+        if name not in ALLOWED_TOOLS:
+            raise EmailSourceError("tool_not_allowed")
+        if self.fail_with is not None:
+            raise self.fail_with
+        self.calls.append((name, dict(arguments)))
+        queue = self.responses.setdefault(name, [])
+        if not queue:
+            return {}
+        return queue.pop(0)
 
 
 class FakeExtractor(ReceiptExtractor):

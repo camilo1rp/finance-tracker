@@ -1,0 +1,14 @@
+{
+  "id": "msg_test_oversize_01",
+  "snippet": "A long body for truncation.",
+  "subject": "Oversize body",
+  "sender": "orders@example-shop.test",
+  "toRecipients": ["buyer@example-user.test"],
+  "ccRecipients": [],
+  "date": "2024-06-02",
+  "plaintextBody": "aaaébbb",
+  "htmlBody": "",
+  "attachmentIds": [],
+  "attachments": [],
+  "labelIds": ["INBOX"]
+}

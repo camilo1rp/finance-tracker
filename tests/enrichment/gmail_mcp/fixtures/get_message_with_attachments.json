@@ -1,0 +1,20 @@
+{
+  "id": "msg_test_attach_01",
+  "snippet": "Receipt with an invoice attachment.",
+  "subject": "Invoice attached",
+  "sender": "orders@example-shop.test",
+  "toRecipients": ["buyer@example-user.test"],
+  "ccRecipients": [],
+  "date": "2024-06-02",
+  "plaintextBody": "Please see the attached invoice.",
+  "htmlBody": "",
+  "attachmentIds": ["att_test_01"],
+  "attachments": [
+    {
+      "id": "att_test_01",
+      "mimeType": "application/pdf",
+      "filename": "invoice-test.pdf"
+    }
+  ],
+  "labelIds": ["INBOX"]
+}
