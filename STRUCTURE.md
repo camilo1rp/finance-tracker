@@ -4,6 +4,9 @@ finance-tracker/
 ├── docker-compose.yml       # postgres + api services
 ├── Dockerfile
 ├── requirements.txt
+├── requirements-dev.txt     # langgraph-cli[inmem] for Studio
+├── Makefile                 # make studio → langgraph dev
+├── langgraph.json           # Studio graph entrypoints (coordinator, steward, analyst)
 ├── .env.example
 ├── README.md                # API + agent CLI
 ├── QA.md                    # import QA pass (Chase + Apple)
@@ -40,7 +43,8 @@ finance-tracker/
 │   │
 │   └── agent/                 # LangGraph CLI agents (no chat UI)
 │       ├── cli.py             # python -m app.agent.cli [--steward] [thread_id]
-│       ├── coordinator.py     # outer create_agent; only graph with a checkpointer
+│       ├── studio.py          # LangGraph Studio factories (no compile-time checkpointer)
+│       ├── coordinator.py     # outer create_agent; checkpointer required for CLI
 │       ├── analyst.py         # read-only analysis subagent
 │       ├── steward_graph.py   # propose → preview → interrupt → apply
 │       ├── config.py          # model name, tool sessions, checkpointer factory
@@ -59,6 +63,6 @@ finance-tracker/
 
 ## Agent notes
 
-The coordinator compiles **with** the checkpointer. Analyst and steward compile **without** one so they inherit it at runtime; that is what lets a steward `interrupt()` bubble to the CLI on the same thread.
+The coordinator compiles **with** a checkpointer for the CLI. `checkpointer=None` is valid only when served by the LangGraph API server (see `studio.py`). Analyst and steward compile **without** one so steward `interrupt()` bubbles to the outer graph on the same thread.
 
-`python -m app.agent.cli <thread_id>` is the coordinator. `--steward` compiles the steward graph with the checkpointer for direct use. Approval UX is `approve` / `reject` / `edit 0,2` over plan ops. Checkpoints persist on Postgres or on the SQLite file at `AGENT_CHECKPOINT_PATH`.
+`python -m app.agent.cli <thread_id>` is the coordinator. `--steward` compiles the steward graph with the checkpointer for direct use. `make studio` starts LangGraph Studio for visual debugging. Approval UX is `approve` / `reject` / `edit 0,2` over plan ops. Checkpoints persist on Postgres or on the SQLite file at `AGENT_CHECKPOINT_PATH`.

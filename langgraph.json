@@ -1,0 +1,9 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "coordinator": "./app/agent/studio.py:coordinator_graph",
+    "steward": "./app/agent/studio.py:steward_graph",
+    "analyst": "./app/agent/studio.py:analyst_graph"
+  },
+  "env": ".env"
+}

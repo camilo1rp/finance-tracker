@@ -55,3 +55,43 @@ See `.env.example`:
 - `DATABASE_URL` — app database (and Postgres checkpoints when this is Postgres)
 - `STEWARD_MODEL` — model id for coordinator, analyst, and steward (default `anthropic:claude-sonnet-4-6`)
 - `AGENT_CHECKPOINT_PATH` — SQLite checkpoint file when not using Postgres
+
+## Observability
+
+### LangSmith tracing
+
+Tracing is optional and env-driven — no LangSmith key is required to run the CLI, API, or tests.
+
+1. Sign up at [smith.langchain.com](https://smith.langchain.com) and create an API key.
+2. Uncomment the observability block in `.env.example` and copy into `.env`:
+
+```bash
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=<your-key>
+LANGSMITH_PROJECT=finance-agent
+# LANGSMITH_ENDPOINT=https://api.smith.langchain.com   # US default; use https://eu.api.smith.langchain.com for EU
+```
+
+Each CLI turn produces one trace named `coordinator-turn` or `steward-turn`, tagged `cli` or `steward-cli`, with `thread_id` in metadata. Expand the tree to see:
+
+- **Coordinator run** → `ask_analyst` tool call (full task string in tool input) → analyst's `summarize` calls
+- **Steward approval** → `preview_mappings` span → interrupt gap → post-resume `apply_mapping_plan` and `run_reclassification` with `reclass_updated`
+
+Traces include transaction data and upload to LangSmith cloud. Optional `LANGSMITH_HIDE_INPUTS` / `LANGSMITH_HIDE_OUTPUTS` hide all payloads — including the task strings tracing exists to show. Use tracing in dev only when that trade-off is acceptable.
+
+### LangGraph Studio
+
+Local graph debugging via [LangGraph Studio](https://smith.langchain.com/studio/). Requires Python ≥ 3.11 and &lt; 3.14, plus dev deps:
+
+```bash
+pip install -r requirements-dev.txt
+make studio
+```
+
+Open [Studio](https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024) (or use the URL printed when the server starts). Verify the API is up at `http://127.0.0.1:2024/docs`.
+
+**Chrome:** Studio runs on HTTPS and talks to your local HTTP server. On first connect, allow **Local network access** for `smith.langchain.com` — click the site icon left of the address bar → **Site settings** → **Local network access** → **Allow**, then reload Studio. If the option is missing, add `https://smith.langchain.com` at `chrome://settings/content/localNetworkAccess`.
+
+Three graphs are registered in `langgraph.json`: `coordinator`, `steward`, `analyst`. Studio uses an in-memory checkpointer; threads vanish on server restart. The CLI's Postgres/SQLite checkpointer is separate and unaffected.
+
+Run a mapping-cleanup message on the steward or coordinator graph to hit the `human_approval` interrupt and resume from the Studio UI.

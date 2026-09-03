@@ -13,8 +13,15 @@ from app.agent.steward_graph import build_steward_graph
 RECURSION_LIMIT = 25
 
 
-def _config(thread_id: str) -> dict:
-    return {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
+def _config(thread_id: str, *, steward: bool = False) -> dict:
+    entrypoint = "steward-cli" if steward else "cli"
+    return {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": RECURSION_LIMIT,
+        "run_name": "steward-turn" if steward else "coordinator-turn",
+        "tags": [entrypoint],
+        "metadata": {"thread_id": thread_id, "entrypoint": entrypoint},
+    }
 
 
 def _op_label(op: dict) -> str:
@@ -166,7 +173,7 @@ def main(argv: list[str] | None = None) -> None:
             graph = build_steward_graph(checkpointer=checkpointer)
         else:
             graph = build_coordinator(checkpointer=checkpointer)
-        config = _config(thread_id)
+        config = _config(thread_id, steward=args.steward)
         snapshot = graph.get_state(config)
         if snapshot.interrupts:
             payload = snapshot.interrupts[0].value

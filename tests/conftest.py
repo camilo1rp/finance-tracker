@@ -2,6 +2,27 @@ import os
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
+# Set before any app import so load_dotenv() cannot refill tracing from .env.
+_TRACING_DISABLED = {
+    "LANGSMITH_TRACING": "false",
+    "LANGSMITH_API_KEY": "",
+    "LANGSMITH_PROJECT": "",
+    "LANGSMITH_ENDPOINT": "",
+    "LANGSMITH_HIDE_INPUTS": "false",
+    "LANGSMITH_HIDE_OUTPUTS": "false",
+    "LANGSMITH_HIDE_METADATA": "false",
+    "LANGCHAIN_TRACING": "false",
+    "LANGCHAIN_TRACING_V2": "false",
+    "LANGCHAIN_API_KEY": "",
+    "LANGCHAIN_PROJECT": "",
+    "LANGCHAIN_ENDPOINT": "",
+    "LANGCHAIN_HIDE_INPUTS": "false",
+    "LANGCHAIN_HIDE_OUTPUTS": "false",
+    "LANGCHAIN_HIDE_METADATA": "false",
+}
+for _key, _value in _TRACING_DISABLED.items():
+    os.environ[_key] = _value
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
@@ -27,6 +48,12 @@ def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
 
 
 TestingSessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+
+@pytest.fixture(autouse=True)
+def _disable_tracing_env() -> None:
+    for key, value in _TRACING_DISABLED.items():
+        os.environ[key] = value
 
 
 @pytest.fixture()

@@ -10,3 +10,4 @@ __pycache__/
 *.sqlite
 *.sqlite3
 .agent_checkpoints.sqlite
+.langgraph_api/

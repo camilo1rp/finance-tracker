@@ -8,6 +8,7 @@ ops and reclassifies in a single transaction.
 from dataclasses import dataclass, field
 from typing import Literal
 
+from langsmith import traceable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -42,6 +43,10 @@ from app.services.ingest_service import _backfill_merchant_raw, run_reclassifica
 
 _SAMPLE_CAP = 5
 _OpType = Literal["create", "update", "delete"]
+
+
+def _service_trace_inputs(inputs: dict) -> dict:
+    return {key: value for key, value in inputs.items() if key != "db"}
 
 
 @dataclass
@@ -444,6 +449,7 @@ def _classify_row(
     )
 
 
+@traceable(process_inputs=_service_trace_inputs)
 def preview_mappings(db: Session, plan: MappingPlanIn) -> MappingPreview:
     """Recompute classification under the plan's virtual rule set. Read-only."""
     accs, validation_errors = parse_plan_ops(db, plan)
@@ -683,6 +689,7 @@ class MappingPlanValidationError(ValueError):
         super().__init__("; ".join(errors))
 
 
+@traceable(process_inputs=_service_trace_inputs)
 def apply_mapping_plan(db: Session, plan: MappingPlanIn) -> ApplyResult:
     """Apply approved ops and reclassify. Commits once; rolls back on failure."""
     accs, errors = parse_plan_ops(db, plan, allow_missing_delete=True)

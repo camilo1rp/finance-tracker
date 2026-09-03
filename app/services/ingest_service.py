@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from langsmith import traceable
+
 from app.domain.classification import (
     TransactionType,
     classify_category,
@@ -29,6 +31,10 @@ from app.models import Account, ImportBatch, Owner, Transaction
 
 class AccountNotFoundError(ValueError):
     pass
+
+
+def _service_trace_inputs(inputs: dict) -> dict:
+    return {key: value for key, value in inputs.items() if key != "db"}
 
 
 def mapping_from_stored(data: dict) -> ImportMapping:
@@ -143,6 +149,7 @@ def ingest_from_source(
     )
 
 
+@traceable(process_inputs=_service_trace_inputs)
 def run_reclassification(
     db: Session,
     account_id: int | None = None,

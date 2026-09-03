@@ -32,9 +32,12 @@ def build_coordinator(
     steward_model=None,
     checkpointer=None,
 ):
-    """Compile the coordinator. This is the only graph that gets a checkpointer."""
-    if checkpointer is None:
-        raise ValueError("checkpointer is required on the coordinator (the only saver in the stack)")
+    """Compile the coordinator. This is the only graph that gets a checkpointer.
+
+    checkpointer=None is valid only when the graph is served by the LangGraph API
+    server, which injects its own persistence; interrupts will fail without one
+    otherwise. The only in-repo caller that passes None is app.agent.studio.
+    """
     resolved = model if model is not None else model_name()
     analyst = build_analyst(model=analyst_model if analyst_model is not None else resolved)
     steward = build_steward_graph(
@@ -48,11 +51,15 @@ def build_coordinator(
         summarize,
         *make_subagent_tools(analyst=analyst, steward=steward),
     ]
+    agent_kwargs: dict = {
+        "system_prompt": COORDINATOR_PROMPT,
+        "middleware": [CurrentDateMiddleware()],
+        "name": "coordinator",
+    }
+    if checkpointer is not None:
+        agent_kwargs["checkpointer"] = checkpointer
     return create_agent(
         resolved,
         tools,
-        system_prompt=COORDINATOR_PROMPT,
-        checkpointer=checkpointer,
-        middleware=[CurrentDateMiddleware()],
-        name="coordinator",
+        **agent_kwargs,
     )
