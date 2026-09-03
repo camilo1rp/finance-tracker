@@ -2,13 +2,31 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 import uuid
 
 from langgraph.types import Command
+from sqlalchemy import select
 
-from app.agent.config import open_checkpointer
+from app.agent.config import (
+    email_max_candidates,
+    email_lookahead_days,
+    email_lookback_days,
+    email_provider,
+    email_source_from_env,
+    extractor_from_env,
+    get_tool_session_factory,
+    open_checkpointer,
+)
 from app.agent.coordinator import build_coordinator
 from app.agent.steward_graph import build_steward_graph
+from app.services.enrichment_service import (
+    EnrichmentConfig,
+    enrich_range,
+    find_candidates,
+    seed_merchant_senders,
+)
+from app.models import Transaction
 
 RECURSION_LIMIT = 25
 
@@ -156,11 +174,99 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Run the steward graph alone (no coordinator)",
     )
+    parser.add_argument(
+        "--enrich",
+        action="store_true",
+        help="Run email enrichment over a transaction date range",
+    )
+    parser.add_argument("--from", dest="date_from")
+    parser.add_argument("--to", dest="date_to")
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--seed-senders", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
+
+
+def _run_enrich(args: argparse.Namespace) -> int:
+    if not args.date_from or not args.date_to:
+        raise SystemExit("--from and --to are required with --enrich")
+    source = email_source_from_env()
+    if source is None:
+        print(f"EMAIL_PROVIDER={email_provider()} produced no email source")
+        return 1
+    extractor = extractor_from_env()
+    session_factory = get_tool_session_factory()
+    parsed_from = date.fromisoformat(args.date_from)
+    parsed_to = date.fromisoformat(args.date_to)
+    if args.seed_senders:
+        with session_factory() as db:
+            inserted = seed_merchant_senders(db)
+            db.commit()
+        print(f"seeded_merchant_senders={inserted}")
+    config = EnrichmentConfig(
+        lookback_days=email_lookback_days(),
+        lookahead_days=email_lookahead_days(),
+        max_candidates=email_max_candidates(),
+        force=args.force,
+        allow_text_hint=getattr(source, "allowlist", []) == ["*"],
+    )
+    if args.dry_run:
+        with session_factory() as db:
+            txn_ids = list(
+                db.scalars(
+                    select(Transaction.id).where(
+                        Transaction.is_spend.is_(True),
+                        Transaction.transaction_date >= parsed_from,
+                        Transaction.transaction_date <= parsed_to,
+                    )
+                ).all()
+            )
+            for txn_id in txn_ids:
+                txn = db.get(Transaction, txn_id)
+                if txn is None:
+                    continue
+                refs = find_candidates(
+                    db,
+                    source,
+                    txn,
+                    config.lookback_days,
+                    config.lookahead_days,
+                    config.allow_text_hint,
+                )
+                print(f"transaction_id={txn.id} candidates={len(refs)}")
+        return 0
+    report = enrich_range(
+        session_factory,
+        source,
+        extractor,
+        parsed_from,
+        parsed_to,
+        config,
+    )
+    print(
+        " ".join(
+            [
+                f"scanned={report.scanned}",
+                f"enriched={report.enriched}",
+                f"unmatched={report.unmatched}",
+                f"skipped={report.skipped}",
+                f"failed={report.failed}",
+                f"duration_s={report.duration_s}",
+            ]
+        )
+    )
+    for outcome in report.outcomes:
+        if outcome.error_class:
+            print(
+                f"transaction_id={outcome.transaction_id} error_class={outcome.error_class}"
+            )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
+    if args.enrich:
+        raise SystemExit(_run_enrich(args))
     thread_id = args.thread_id or str(uuid.uuid4())
     prefix = "steward" if args.steward else "agent"
     print(

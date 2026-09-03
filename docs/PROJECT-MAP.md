@@ -146,7 +146,7 @@ finance-tracker-skeleton/
 
 ## 3. Data model
 
-Five tables. No Alembic; `app/database.py::init_db` runs `Base.metadata.create_all` then additive ALTERs.
+Eight tables. No Alembic; `app/database.py::init_db` runs `Base.metadata.create_all` then additive ALTERs.
 
 ### 3.1 `owners` — `app/models.py::Owner`
 
@@ -226,7 +226,7 @@ Constraint (verbatim): `UniqueConstraint("dedupe_hash", name="uq_transaction_ded
 | raw_type | String | yes | type cell stripped; None for sign-derived |
 | category_raw | String | yes | stripped, not lowercased |
 | category_normalized | String | yes | lookup canonical or None |
-| category_override | String | yes | PATCH only; reclassify never writes |
+| category_override | String | yes | PATCH and plan-gated transaction override write target; reclassify never writes |
 | merchant_raw | String | yes | column or extracted; whitespace-collapsed |
 | merchant_normalized | String | yes | lookup canonical or None |
 | merchant_override | String | yes | PATCH only; reclassify never writes |
@@ -253,7 +253,72 @@ effective_merchant = case(
 
 Python equivalent for merchant: `app/domain/merchant.py::resolved_merchant` — override > normalized > raw (strip; empty → skip).
 
-### 3.7 Enums (verbatim value sets)
+### 3.7 `transaction_evidence` — `app/models.py::TransactionEvidence`
+
+Constraint (verbatim):
+
+```
+UniqueConstraint(
+    "transaction_id",
+    "kind",
+    "external_ref",
+    name="uq_transaction_evidence_identity",
+)
+```
+
+Index: `Index("ix_transaction_evidence_kind_match_kind", "kind", "match_kind")`.
+
+| Column | Type | Null | Notes |
+|---|---|---|---|
+| id | Integer PK | no | |
+| transaction_id | Integer FK → `transactions.id` | no | `ON DELETE CASCADE` |
+| kind | String | no | `EvidenceKind` value |
+| provider | String | no | source provider name |
+| external_ref | String | no | provider message id |
+| extraction | JSON | no | serialized `ReceiptExtraction`; raw email body is never stored |
+| match_kind | String | no | `MatchKind` value |
+| confidence | Float | no | |
+| dominant_category | String | yes | snapped canonical or `"unknown"` |
+| dominant_category_raw | String | yes | raw line-item hint before snap |
+| extractor_version | String | no | |
+| created_at | DateTime | no | UTC-now default |
+
+### 3.8 `merchant_senders` — `app/models.py::MerchantSender`
+
+Constraint (verbatim):
+
+```
+UniqueConstraint(
+    "merchant_key",
+    "sender_pattern",
+    name="uq_merchant_sender",
+)
+```
+
+| Column | Type | Null | Notes |
+|---|---|---|---|
+| id | Integer PK | no | |
+| merchant_key | String | no | cleaned effective merchant |
+| sender_pattern | String | no | lowercased domain, address, or glob |
+| origin | String | no | `SenderOrigin` value |
+| created_at | DateTime | no | UTC-now default |
+
+Binding resolution item 13: `merchant_senders.merchant_key = clean_raw_value(effective merchant)`. Sender lookups clean the effective merchant at query time with the same helper.
+
+### 3.9 `transaction_overrides` — `app/models.py::TransactionOverride`
+
+Provenance table only. Category precedence is unchanged: `Transaction.category_override` still drives `effective_category`; `transaction_overrides` records why that override exists.
+
+| Column | Type | Null | Notes |
+|---|---|---|---|
+| id | Integer PK | no | |
+| transaction_id | Integer FK → `transactions.id` | no | `ON DELETE CASCADE`, `unique=True` |
+| category | String | no | canonical category written to `Transaction.category_override` |
+| evidence_ids | JSON | no | list of evidence row ids; may be empty |
+| plan_source | String | yes | free-text plan/thread reference |
+| created_at | DateTime | no | UTC-now default |
+
+### 3.10 Enums (verbatim value sets)
 
 `app/domain/classification.py::TransactionType`: `SPEND`, `REFUND`, `PAYMENT`, `ADJUSTMENT`, `UNKNOWN`.
 
@@ -263,7 +328,7 @@ Python equivalent for merchant: `app/domain/merchant.py::resolved_merchant` — 
 
 `app/schemas.py::MappingKind`: same four strings as `NormalizationKind`.
 
-### 3.8 Cleaning
+### 3.11 Cleaning
 
 `app/domain/classification.py::clean_raw_value` — `raw_value.strip().lower()`.
 
@@ -273,7 +338,7 @@ Applied at read: `classify_transaction_type`, `classify_category` (raw + merchan
 
 Not cleaned: `category_raw` / `owner_raw` / `raw_type` / `description` as stored on transactions (stripped only). Merchant extraction collapses whitespace (`extract_merchant` / merchant_col `" ".join(str.split())`).
 
-### 3.9 ER
+### 3.12 ER
 
 ```mermaid
 erDiagram
@@ -282,6 +347,8 @@ erDiagram
     Account ||--o{ Transaction : has
     Account ||--o{ ImportBatch : imports
     Account ||--o{ NormalizationMapping : scopes
+    Transaction ||--o{ TransactionEvidence : has
+    Transaction ||--o| TransactionOverride : override_provenance
     ImportBatch ||--o{ Transaction : batch
 
     Owner {
@@ -303,6 +370,35 @@ erDiagram
         string canonical_value
         int account_id FK
         string merchant
+    }
+    TransactionEvidence {
+        int id PK
+        int transaction_id FK
+        string kind
+        string provider
+        string external_ref
+        json extraction
+        string match_kind
+        float confidence
+        string dominant_category
+        string dominant_category_raw
+        string extractor_version
+        datetime created_at
+    }
+    MerchantSender {
+        int id PK
+        string merchant_key
+        string sender_pattern
+        string origin
+        datetime created_at
+    }
+    TransactionOverride {
+        int id PK
+        int transaction_id FK
+        string category
+        json evidence_ids
+        string plan_source
+        datetime created_at
     }
     ImportBatch {
         int id PK
@@ -607,6 +703,28 @@ Order inside one try: **deletes** (missing → skip `missing`) + flush; **update
 Idempotent re-apply of mixed plan: creates skip duplicate, deletes skip missing, updates re-applied (canonical already new → reclass_updated 0). Proven: `test_apply_idempotent`, `test_apply_mixed_plan_atomic_and_reapply`. Reclass failure rolls back mapping writes: `test_apply_transactional`, `test_apply_mixed_plan_rolls_back_on_reclass_failure`.
 
 Other helpers: `find_mapping_by_identity`, `validate_create_op` (mirrors POST /mappings checks; 1-based index in messages).
+
+### 7.4 `enrichment_service.py`
+
+Email enrichment is a deterministic, no-network/no-LLM path in Part A. It writes only `transaction_evidence` and `merchant_senders`; it does not mutate any `Transaction` column or mapping row.
+
+**`known_categories(db) -> list[str]`** — distinct stored category canonicals plus distinct non-null `Transaction.category_override` values; preserves stored spelling.
+
+**`sender_patterns_for(db, merchant_key) -> list[str]`** — returns `merchant_senders.sender_pattern` rows ordered by insert id.
+
+**`find_candidates(db, source, txn, lookback_days, lookahead_days, allow_text_hint) -> list[EmailRef]`** — resolves the transaction's effective merchant via `resolved_merchant` / `_backfill_merchant_raw`, cleans it, loads sender patterns, then calls `EmailSource.search`. If there are no sender rows and `allow_text_hint` is true (only when allowlist is `["*"]`), it falls back to `senders=["*"]` plus merchant-word text hints.
+
+**`sibling_transactions(db, txn, window_days=5, limit=4)`** — same account + same cleaned effective merchant, excluding the txn itself, bounded date window, capped for subset-sum matching.
+
+**`enrich_transaction(db, source, extractor, txn_id, config) -> EnrichmentOutcome`** — load txn; skip as `already_enriched` when non-unmatched evidence exists unless `force`; search candidates; fetch each candidate; extract receipt; score with `match_receipt`; upsert one `TransactionEvidence` row per fetched candidate including unmatched ones; optionally `learn_sender`; **commit once**. On exception: rollback, return `failed` with `error_class` only. `EmailSourceUnavailable` becomes `source_unavailable`.
+
+**`learn_sender(db, merchant_key, sender_address)`** — idempotent insert into `merchant_senders` with `origin="learned"`.
+
+**`enrich_range(session_factory, source, extractor, date_from, date_to, config) -> EnrichmentReport`** — one short selector session to collect candidate ids, then **one session per transaction** for enrichment. Failures are counted and the loop continues.
+
+**`seed_merchant_senders(db) -> int`** — idempotently seeds domain-only senders for Amazon, Apple, Uber, Lyft, Netflix, Spotify, Google, Microsoft with `origin="seed"`.
+
+**Tracing:** `find_candidates` and `enrich_transaction` use `@traceable(process_inputs=_enrichment_trace_inputs, process_outputs=_enrichment_trace_outputs)`. Strippers drop `db` / `source` / `extractor` and redact `EmailMessage.body_text`, `EmailRef.snippet`, email headers, and receipt line-item descriptions.
 
 ---
 
@@ -997,6 +1115,16 @@ Never read `.env` values into this document. Names from `.env.example` and code:
 | `DATABASE_URL` | SQLAlchemy URL for app DB; if `postgresql*`, also Postgres checkpointer | **required** (`Settings.database_url`, no default) | `app/config.py::Settings`; tests `setdefault("sqlite:///:memory:")` then use a separate StaticPool engine |
 | `STEWARD_MODEL` | Model id for coordinator, analyst, steward | `anthropic:claude-sonnet-4-6` (`DEFAULT_MODEL`) | `app/agent/config.py::model_name` |
 | `AGENT_CHECKPOINT_PATH` | SQLite checkpoint file when DB is not Postgres | `.agent_checkpoints.sqlite` | `checkpoint_sqlite_path` |
+| `EMAIL_PROVIDER` | Email source selector: `none` / `fake` / `gmail` | `none` | `app/agent/config.py::email_source_from_env` |
+| `EMAIL_SENDER_ALLOWLIST` | Comma-separated sender scope for all email sources; empty means none, `*` means unrestricted | empty string | `parse_allowlist` + `AllowlistedEmailSource` |
+| `EMAIL_LOOKBACK_DAYS` | Candidate search lookback window | `2` | `app/agent/cli.py::_run_enrich` / `EnrichmentConfig` |
+| `EMAIL_LOOKAHEAD_DAYS` | Candidate search lookahead window | `7` | `app/agent/cli.py::_run_enrich` / `EnrichmentConfig` |
+| `EMAIL_MAX_RESULTS_PER_SEARCH` | Cap passed to `EmailQuery.max_results` | `10` | `app/services/enrichment_service.py::find_candidates` |
+| `EMAIL_MAX_CANDIDATES` | Max fetched candidates per transaction | `5` | `EnrichmentConfig.max_candidates` |
+| `EMAIL_BODY_BYTE_CAP` | Adapter body-text truncation cap | `65536` | `FixtureEmailSource` today; future adapters too |
+| `ENRICHMENT_CONFIDENCE_THRESHOLD` | Reserved config for Task 03 decisioning | `0.8` | `app/agent/config.py::enrichment_confidence_threshold` |
+| `EMAIL_FAKE_FIXTURE` | JSON fixture path used when `EMAIL_PROVIDER=fake` | none | `app/agent/config.py::email_source_from_env` |
+| `EXTRACTION_MODEL` | Empty keeps the regex extractor fallback; Part C binds a model here | empty string | `app/agent/config.py::extraction_model_name` / `extractor_from_env` |
 | `ANTHROPIC_API_KEY` | Provider SDK (comment in `.env.example`) | none | not referenced in app code |
 | `OPENAI_API_KEY` | Provider SDK if `STEWARD_MODEL` is `openai:...` | none | not referenced in app code |
 | `LANGSMITH_TRACING` | Enable LangSmith tracing (SDK reads; app code does not) | unset / false | LangChain/LangGraph/LangSmith SDK |
@@ -1042,12 +1170,13 @@ Optional `LANGSMITH_*` vars documented in `.env.example`; `Settings` uses `extra
 
 ## 12. Testing strategy
 
-Run: `.venv/bin/python -m pytest` (119 passed). `scripts/verify_api.py` is a separate HTTP walkthrough, not pytest.
+Run: `.venv/bin/python -m pytest` (147 passed). `scripts/verify_api.py` is a separate HTTP walkthrough, not pytest.
 
 | Suite | Covers | Fixtures / fakes |
 |---|---|---|
-| `tests/test_smoke.py` | `/health`, `/docs`, five tables exist | `client`, `db_session` |
+| `tests/test_smoke.py` | `/health`, `/docs`, eight tables exist | `client`, `db_session` |
 | `tests/domain/` | mapping validation, resolve placeholder, CSV source, parse/classify/merchant/dedupe, merged vs DB lookup | `InMemoryNormalizationLookup` (`tests/fakes.py`) |
+| `tests/enrichment/` | allowlist enforcement, deterministic receipt matching, enrichment persistence/rollback, trace redaction, enrichment CLI | `FakeEmailSource`, `FakeExtractor`, shared SQLite |
 | `tests/routers/` | HTTP contracts, import+dedupe+patch, reclassify gates, analytics aliases/filters, mapping CRUD/preview/apply | TestClient + shared SQLite |
 | `tests/services/` | preview purity/gates/shadow/conflict; apply txn/idempotency/conflicts | direct service calls |
 | `tests/agent/` | scripted graphs, interrupt/resume, CLI parse/config, middleware, coordinator routing, Studio entrypoints | `ScriptedChatModel`, `agent_sessions`, `seed_coffee`, `capture_apply` |
@@ -1067,6 +1196,8 @@ Run: `.venv/bin/python -m pytest` (119 passed). `scripts/verify_api.py` is a sep
 | Deferred | What exists to plug into |
 |---|---|
 | New file/API sources | `TransactionSource.fetch(**kwargs)`; ingest already source-agnostic. Commented `PdfSource` / `ApiSource` in `sources.py`. `Account.source_format` string. |
+| Email providers | `app/domain/email_source.py::EmailSource` is the port; `AllowlistedEmailSource` centralizes allowlist intersection + fetch re-validation. `EMAIL_PROVIDER=gmail` is reserved for Task 02 and currently raises `NotImplementedError`. |
+| Receipt extractors | `app/domain/receipts.py::ReceiptExtractor` is the port. Part A ships `RegexReceiptExtractor` as the deterministic fallback and test baseline. |
 | Per-import mapping override | `resolve_mapping(..., override=)` currently ignores override. HTTP import has no override field. |
 | Alternate lookups | `NormalizationLookup` + fake in tests; preview uses `MergedNormalizationLookup`. |
 | Research agent | none. Would wrap like `ask_analyst` (task string, return last text, no parent history). Coordinator prompt would need a new tool. |

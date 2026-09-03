@@ -15,6 +15,13 @@ _session_factory: sessionmaker[Session] | None = None
 
 DEFAULT_MODEL = "anthropic:claude-sonnet-4-6"
 DEFAULT_CHECKPOINT_PATH = ".agent_checkpoints.sqlite"
+DEFAULT_EMAIL_PROVIDER = "none"
+DEFAULT_EMAIL_LOOKBACK_DAYS = 2
+DEFAULT_EMAIL_LOOKAHEAD_DAYS = 7
+DEFAULT_EMAIL_MAX_RESULTS_PER_SEARCH = 10
+DEFAULT_EMAIL_MAX_CANDIDATES = 5
+DEFAULT_EMAIL_BODY_BYTE_CAP = 65536
+DEFAULT_ENRICHMENT_CONFIDENCE_THRESHOLD = 0.8
 
 
 def model_name() -> str:
@@ -25,10 +32,90 @@ def checkpoint_sqlite_path() -> str:
     return os.environ.get("AGENT_CHECKPOINT_PATH", DEFAULT_CHECKPOINT_PATH)
 
 
+def email_provider() -> str:
+    return os.environ.get("EMAIL_PROVIDER", DEFAULT_EMAIL_PROVIDER)
+
+
+def email_sender_allowlist() -> str:
+    return os.environ.get("EMAIL_SENDER_ALLOWLIST", "")
+
+
+def email_lookback_days() -> int:
+    return int(os.environ.get("EMAIL_LOOKBACK_DAYS", str(DEFAULT_EMAIL_LOOKBACK_DAYS)))
+
+
+def email_lookahead_days() -> int:
+    return int(os.environ.get("EMAIL_LOOKAHEAD_DAYS", str(DEFAULT_EMAIL_LOOKAHEAD_DAYS)))
+
+
+def email_max_results_per_search() -> int:
+    return int(
+        os.environ.get(
+            "EMAIL_MAX_RESULTS_PER_SEARCH", str(DEFAULT_EMAIL_MAX_RESULTS_PER_SEARCH)
+        )
+    )
+
+
+def email_max_candidates() -> int:
+    return int(os.environ.get("EMAIL_MAX_CANDIDATES", str(DEFAULT_EMAIL_MAX_CANDIDATES)))
+
+
+def email_body_byte_cap() -> int:
+    return int(os.environ.get("EMAIL_BODY_BYTE_CAP", str(DEFAULT_EMAIL_BODY_BYTE_CAP)))
+
+
+def enrichment_confidence_threshold() -> float:
+    return float(
+        os.environ.get(
+            "ENRICHMENT_CONFIDENCE_THRESHOLD",
+            str(DEFAULT_ENRICHMENT_CONFIDENCE_THRESHOLD),
+        )
+    )
+
+
+def extraction_model_name() -> str:
+    return os.environ.get("EXTRACTION_MODEL", "")
+
+
+def email_source_from_env():
+    from app.domain.email_source import FixtureEmailSource, parse_allowlist
+
+    provider = email_provider()
+    if provider == "none":
+        return None
+    if provider == "gmail":
+        raise NotImplementedError("EMAIL_PROVIDER=gmail is not implemented yet")
+    if provider != "fake":
+        raise ValueError(f"unsupported EMAIL_PROVIDER={provider!r}")
+    fixture = os.environ.get("EMAIL_FAKE_FIXTURE")
+    if not fixture:
+        raise ValueError("EMAIL_FAKE_FIXTURE is required when EMAIL_PROVIDER=fake")
+    return FixtureEmailSource.from_json_fixture(
+        fixture,
+        parse_allowlist(email_sender_allowlist()),
+        byte_cap=email_body_byte_cap(),
+    )
+
+
+def extractor_from_env():
+    from app.domain.receipts import RegexReceiptExtractor
+
+    return RegexReceiptExtractor()
+
+
 def set_session_factory(factory: sessionmaker[Session] | None) -> None:
     """Tests inject the pytest engine so tools share the same SQLite database."""
     global _session_factory
     _session_factory = factory
+
+
+def get_tool_session_factory() -> sessionmaker[Session]:
+    factory = _session_factory
+    if factory is not None:
+        return factory
+    from app.database import _get_session_factory
+
+    return _get_session_factory()
 
 
 @contextmanager

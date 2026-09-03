@@ -8,7 +8,7 @@ real table (not a free string) so it can be referenced consistently across
 accounts and validated at creation time. NormalizationMapping is the single
 generic lookup table backing type/category/owner classification.
 """
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import (
@@ -19,6 +19,8 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Boolean,
+    Float,
+    Index,
     UniqueConstraint,
     case,
 )
@@ -27,6 +29,10 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
     pass
+
+
+def _utcnow_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class Owner(Base):
@@ -118,6 +124,64 @@ class Transaction(Base):
 
     account: Mapped["Account"] = relationship(back_populates="transactions")
     owner: Mapped["Owner | None"] = relationship()
+
+
+class TransactionEvidence(Base):
+    __tablename__ = "transaction_evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "transaction_id",
+            "kind",
+            "external_ref",
+            name="uq_transaction_evidence_identity",
+        ),
+        Index("ix_transaction_evidence_kind_match_kind", "kind", "match_kind"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    transaction_id: Mapped[int] = mapped_column(
+        ForeignKey("transactions.id", ondelete="CASCADE")
+    )
+    kind: Mapped[str] = mapped_column(String)
+    provider: Mapped[str] = mapped_column(String)
+    external_ref: Mapped[str] = mapped_column(String)
+    extraction: Mapped[dict] = mapped_column(JSON)
+    match_kind: Mapped[str] = mapped_column(String)
+    confidence: Mapped[float] = mapped_column(Float)
+    dominant_category: Mapped[str | None] = mapped_column(String, nullable=True)
+    dominant_category_raw: Mapped[str | None] = mapped_column(String, nullable=True)
+    extractor_version: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+
+
+class MerchantSender(Base):
+    __tablename__ = "merchant_senders"
+    __table_args__ = (
+        UniqueConstraint(
+            "merchant_key",
+            "sender_pattern",
+            name="uq_merchant_sender",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    merchant_key: Mapped[str] = mapped_column(String)
+    sender_pattern: Mapped[str] = mapped_column(String)
+    origin: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+
+
+class TransactionOverride(Base):
+    __tablename__ = "transaction_overrides"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    transaction_id: Mapped[int] = mapped_column(
+        ForeignKey("transactions.id", ondelete="CASCADE"), unique=True
+    )
+    category: Mapped[str] = mapped_column(String)
+    evidence_ids: Mapped[list[int]] = mapped_column(JSON)
+    plan_source: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
 
 
 effective_category = case(
