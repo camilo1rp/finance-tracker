@@ -6,6 +6,7 @@ from datetime import date, datetime
 from fnmatch import fnmatch
 import json
 from pathlib import Path
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,7 @@ class EmailRef:
     subject: str
     received_at: datetime
     snippet: str
+    received_at_precision: Literal["datetime", "date"] = "datetime"
 
 
 @dataclass(frozen=True)
@@ -32,7 +34,7 @@ class AttachmentRef:
     attachment_id: str
     filename: str
     mime_type: str
-    size_bytes: int
+    size_bytes: int | None
 
 
 @dataclass(frozen=True)
@@ -207,6 +209,7 @@ class FixtureEmailSource(AllowlistedEmailSource):
         super().__init__(allowlist)
         self._messages = {message.ref.message_id: message for message in messages}
         self._provider = provider
+        self.provider = provider
         self._byte_cap = byte_cap
 
     @classmethod
@@ -260,6 +263,9 @@ class FixtureEmailSource(AllowlistedEmailSource):
 
 def email_message_from_dict(data: dict, *, byte_cap: int = 65536) -> EmailMessage:
     ref_data = data["ref"]
+    precision = ref_data.get("received_at_precision", "datetime")
+    if precision not in {"datetime", "date"}:
+        precision = "datetime"
     ref = EmailRef(
         message_id=ref_data["message_id"],
         thread_id=ref_data.get("thread_id"),
@@ -267,21 +273,24 @@ def email_message_from_dict(data: dict, *, byte_cap: int = 65536) -> EmailMessag
         subject=ref_data["subject"],
         received_at=datetime.fromisoformat(ref_data["received_at"]),
         snippet=str(ref_data.get("snippet", ""))[:200],
+        received_at_precision=precision,
     )
     headers = {
         key.lower(): value
         for key, value in dict(data.get("headers") or {}).items()
         if key.lower() in {"from", "to", "date", "subject", "message-id"}
     }
-    attachments = [
-        AttachmentRef(
-            attachment_id=item["attachment_id"],
-            filename=item["filename"],
-            mime_type=item["mime_type"],
-            size_bytes=int(item["size_bytes"]),
+    attachments = []
+    for item in data.get("attachments") or []:
+        raw_size = item.get("size_bytes")
+        attachments.append(
+            AttachmentRef(
+                attachment_id=item["attachment_id"],
+                filename=item["filename"],
+                mime_type=item["mime_type"],
+                size_bytes=int(raw_size) if raw_size is not None else None,
+            )
         )
-        for item in data.get("attachments") or []
-    ]
     body_text, truncated = truncate_text_bytes(str(data.get("body_text", "")), byte_cap)
     return EmailMessage(
         ref=ref,

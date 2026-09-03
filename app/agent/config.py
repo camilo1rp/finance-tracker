@@ -22,6 +22,8 @@ DEFAULT_EMAIL_MAX_RESULTS_PER_SEARCH = 10
 DEFAULT_EMAIL_MAX_CANDIDATES = 5
 DEFAULT_EMAIL_BODY_BYTE_CAP = 65536
 DEFAULT_ENRICHMENT_CONFIDENCE_THRESHOLD = 0.8
+DEFAULT_EMAIL_MCP_URL = "https://gmailmcp.googleapis.com/mcp/v1"
+DEFAULT_EMAIL_MCP_TIMEOUT_S = 20.0
 
 
 def model_name() -> str:
@@ -77,6 +79,29 @@ def extraction_model_name() -> str:
     return os.environ.get("EXTRACTION_MODEL", "")
 
 
+def email_mcp_url() -> str:
+    return os.environ.get("EMAIL_MCP_URL", DEFAULT_EMAIL_MCP_URL)
+
+
+def email_mcp_timeout_s() -> float:
+    return float(os.environ.get("EMAIL_MCP_TIMEOUT_S", str(DEFAULT_EMAIL_MCP_TIMEOUT_S)))
+
+
+def token_provider_from_env():
+    from app.domain.email_source import EmailSourceUnavailable
+    from app.integrations.gmail_mcp.auth import RefreshTokenProvider, StaticTokenProvider
+
+    static = os.environ.get("EMAIL_MCP_ACCESS_TOKEN", "").strip()
+    if static:
+        return StaticTokenProvider(static)
+    client_id = os.environ.get("GMAIL_OAUTH_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("GMAIL_OAUTH_CLIENT_SECRET", "").strip()
+    refresh_token = os.environ.get("GMAIL_OAUTH_REFRESH_TOKEN", "").strip()
+    if client_id and client_secret and refresh_token:
+        return RefreshTokenProvider(client_id, client_secret, refresh_token)
+    raise EmailSourceUnavailable("auth_not_configured")
+
+
 def email_source_from_env():
     from app.domain.email_source import FixtureEmailSource, parse_allowlist
 
@@ -84,7 +109,21 @@ def email_source_from_env():
     if provider == "none":
         return None
     if provider == "gmail":
-        raise NotImplementedError("EMAIL_PROVIDER=gmail is not implemented yet")
+        from app.integrations.gmail_mcp.source import McpEmailSource
+        from app.integrations.gmail_mcp.transport import StreamableHttpMcpTransport
+
+        transport = StreamableHttpMcpTransport(
+            email_mcp_url(),
+            token_provider_from_env(),
+            email_mcp_timeout_s(),
+        )
+        source = McpEmailSource(
+            transport,
+            parse_allowlist(email_sender_allowlist()),
+            email_body_byte_cap(),
+        )
+        source.verify_tools()
+        return source
     if provider != "fake":
         raise ValueError(f"unsupported EMAIL_PROVIDER={provider!r}")
     fixture = os.environ.get("EMAIL_FAKE_FIXTURE")
