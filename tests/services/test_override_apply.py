@@ -2,10 +2,10 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import Account, MerchantSender, Owner, Transaction, TransactionOverride, effective_category
+from app.models import Account, NormalizationMapping, Owner, Transaction, TransactionOverride, effective_category
 from app.schemas import (
     CreateMappingOp,
     MappingPlanIn,
@@ -13,6 +13,7 @@ from app.schemas import (
     SetTransactionCategoryOp,
 )
 from app.services.analytics_service import summarize
+from app.services.ingest_service import reclassify_transactions
 from app.services.mapping_preview_service import MappingPlanValidationError, apply_mapping_plan
 
 
@@ -75,6 +76,7 @@ def test_set_override_create_duplicate_remove_and_replace(db_session: Session) -
     assert dup.skipped[0].reason == "duplicate"
     assert len(db_session.scalars(select(TransactionOverride)).all()) == 1
 
+    mapping_count = db_session.scalar(select(func.count()).select_from(NormalizationMapping))
     with pytest.raises(MappingPlanValidationError):
         apply_mapping_plan(
             db_session,
@@ -86,6 +88,7 @@ def test_set_override_create_duplicate_remove_and_replace(db_session: Session) -
             ),
         )
     assert db_session.get(Transaction, txn.id).category_override == "Dining"
+    assert db_session.scalar(select(func.count()).select_from(NormalizationMapping)) == mapping_count
 
     removed = apply_mapping_plan(
         db_session,
@@ -141,6 +144,61 @@ def test_override_survives_reclassify_and_analytics_use_effective_category(db_se
     )
     db_session.expire_all()
     assert db_session.get(Transaction, txn.id).category_override == "Dining"
+    rows = summarize(db_session, None, None, None, None, "category")
+    assert rows == [{"group_value": "Dining", "total": Decimal("10.00"), "count": 1}]
+
+
+def test_override_survives_reclassify_transactions_endpoint_path(db_session: Session) -> None:
+    account = _seed_account(db_session)
+    txn = _txn(db_session, account.id, "reclass-path")
+    apply_mapping_plan(
+        db_session,
+        MappingPlanIn(ops=[SetTransactionCategoryOp(transaction_id=txn.id, category="Dining")]),
+    )
+    apply_mapping_plan(
+        db_session,
+        MappingPlanIn(
+            ops=[
+                CreateMappingOp(
+                    op="create", kind="category", raw_value="Shopping", canonical_value="Shopping-3"
+                )
+            ]
+        ),
+    )
+    result = reclassify_transactions(db_session, account_id=account.id)
+    assert result.scanned == 1
+    db_session.expire_all()
+    stored = db_session.get(Transaction, txn.id)
+    assert stored.category_override == "Dining"
+    assert stored.category_normalized == "Shopping-3"
+    assert db_session.scalar(select(effective_category).where(Transaction.id == txn.id)) == "Dining"
+
+
+def test_override_survives_subsequent_merchant_rule_change(db_session: Session) -> None:
+    account = _seed_account(db_session)
+    txn = _txn(db_session, account.id, "merchant-rule")
+    apply_mapping_plan(
+        db_session,
+        MappingPlanIn(ops=[SetTransactionCategoryOp(transaction_id=txn.id, category="Dining")]),
+    )
+    apply_mapping_plan(
+        db_session,
+        MappingPlanIn(
+            ops=[
+                CreateMappingOp(
+                    op="create",
+                    kind="category",
+                    raw_value="Shopping",
+                    canonical_value="Household",
+                    merchant="Amazon",
+                )
+            ]
+        ),
+    )
+    db_session.expire_all()
+    stored = db_session.get(Transaction, txn.id)
+    assert stored.category_override == "Dining"
+    assert stored.category_normalized == "Household"
     rows = summarize(db_session, None, None, None, None, "category")
     assert rows == [{"group_value": "Dining", "total": Decimal("10.00"), "count": 1}]
 
