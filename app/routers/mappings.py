@@ -6,12 +6,16 @@ from app.database import get_session
 from app.domain.classification import NormalizationKind, TransactionType, clean_raw_value
 from app.models import Account, NormalizationMapping
 from app.schemas import (
-    ApplyMappingPlanIn,
     ApplyResult,
+    DeleteMappingOp,
+    MappingDeleteOut,
+    MappingPatchIn,
+    MappingPatchOut,
+    MappingPlanIn,
     MappingPreview,
-    MappingPreviewIn,
     NormalizationMappingCreate,
     NormalizationMappingOut,
+    UpdateMappingOp,
 )
 from app.services.ingest_service import AccountNotFoundError
 from app.services.mapping_preview_service import (
@@ -31,6 +35,20 @@ def _validate_kind(kind: str) -> NormalizationKind:
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="kind must be transaction_type, category, owner, or merchant",
         ) from None
+
+
+def _apply_or_raise(db: Session, plan: MappingPlanIn) -> ApplyResult:
+    try:
+        return apply_mapping_plan(db, plan)
+    except MappingPlanValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=exc.errors,
+        ) from exc
+    except AccountNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
 
 
 @router.post("", response_model=NormalizationMappingOut, status_code=status.HTTP_201_CREATED)
@@ -125,42 +143,85 @@ def list_mappings(
 @router.post(
     "/preview",
     response_model=MappingPreview,
-    summary="Preview mapping impact",
+    summary="Preview mapping plan impact",
 )
 def preview_mapping_plan(
-    payload: MappingPreviewIn,
+    payload: MappingPlanIn,
     db: Session = Depends(get_session),
 ) -> MappingPreview:
-    """Compute per-rule impact against stored transactions. Performs no writes."""
-    return preview_mappings(db, payload.rules, account_id=payload.account_id)
+    """Compute per-op impact against stored transactions. Performs no writes."""
+    return preview_mappings(db, payload)
 
 
 @router.post("/apply", response_model=ApplyResult, summary="Apply a mapping plan")
 def apply_approved_plan(
-    payload: ApplyMappingPlanIn,
+    payload: MappingPlanIn,
     db: Session = Depends(get_session),
 ) -> ApplyResult:
-    """Insert approved rules and reclassify in one transaction."""
-    try:
-        return apply_mapping_plan(db, payload)
-    except MappingPlanValidationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=exc.errors,
-        ) from exc
-    except AccountNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-        ) from exc
+    """Apply create/update/delete ops and reclassify in one transaction."""
+    return _apply_or_raise(db, payload)
 
 
-@router.delete("/{mapping_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_mapping(mapping_id: int, db: Session = Depends(get_session)) -> None:
+@router.patch(
+    "/{mapping_id}",
+    response_model=MappingPatchOut,
+    summary="Update a mapping canonical and reclassify",
+)
+def patch_mapping(
+    mapping_id: int,
+    payload: MappingPatchIn,
+    db: Session = Depends(get_session),
+) -> MappingPatchOut:
     row = db.get(NormalizationMapping, mapping_id)
     if row is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"mapping {mapping_id} not found",
         )
-    db.delete(row)
-    db.commit()
+    result = _apply_or_raise(
+        db,
+        MappingPlanIn(
+            ops=[
+                UpdateMappingOp(
+                    op="update",
+                    mapping_id=mapping_id,
+                    canonical_value=payload.canonical_value,
+                )
+            ]
+        ),
+    )
+    updated = db.get(NormalizationMapping, mapping_id)
+    if updated is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"mapping {mapping_id} not found",
+        )
+    body = NormalizationMappingOut.model_validate(updated).model_dump()
+    body["reclass_scanned"] = result.reclass_scanned
+    body["reclass_updated"] = result.reclass_updated
+    return MappingPatchOut.model_validate(body)
+
+
+@router.delete(
+    "/{mapping_id}",
+    response_model=MappingDeleteOut,
+    summary="Delete a mapping and reclassify",
+)
+def delete_mapping(
+    mapping_id: int, db: Session = Depends(get_session)
+) -> MappingDeleteOut:
+    row = db.get(NormalizationMapping, mapping_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"mapping {mapping_id} not found",
+        )
+    result = _apply_or_raise(
+        db,
+        MappingPlanIn(ops=[DeleteMappingOp(op="delete", mapping_id=mapping_id)]),
+    )
+    return MappingDeleteOut(
+        deleted_id=mapping_id,
+        reclass_scanned=result.reclass_scanned,
+        reclass_updated=result.reclass_updated,
+    )

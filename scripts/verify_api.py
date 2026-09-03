@@ -528,7 +528,9 @@ def run(client, suffix: str, report: Report) -> None:
     if report.expect_status("POST disposable mapping", disposable, 201):
         mid = disposable.json()["id"]
         deleted = client.delete(f"/mappings/{mid}")
-        report.expect_status("DELETE /mappings/{id}", deleted, 204)
+        report.expect_status("DELETE /mappings/{id}", deleted, 200)
+        if deleted.status_code == 200:
+            report.expect_eq("DELETE returns deleted_id", deleted.json().get("deleted_id"), mid)
         again = client.delete(f"/mappings/{mid}")
         report.expect_status("DELETE /mappings/{id} missing", again, 404)
 

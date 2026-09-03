@@ -1,11 +1,12 @@
 """
-Preview and apply proposed normalization mappings.
+Preview and apply mapping plans (create / update / delete).
 
-Preview is a pure read: it layers proposed rules over existing ones in memory
-and reports per-rule impact without writing or flushing. Apply inserts the
-approved rules and reclassifies in a single transaction.
+Preview is a pure read: it builds a virtual merged rule set in memory and
+reports per-op impact without writing or flushing. Apply mutates the approved
+ops and reclassifies in a single transaction.
 """
 from dataclasses import dataclass, field
+from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,34 +20,61 @@ from app.domain.classification import (
     classify_transaction_type,
     clean_raw_value,
 )
-from app.domain.db_lookup import merged_lookup_from_db
 from app.domain.merged_lookup import MergedNormalizationLookup, RuleMatch, RuleSpec
 from app.domain.merchant import resolved_merchant
 from app.models import Account, NormalizationMapping, Owner, Transaction
 from app.schemas import (
-    ApplyMappingPlanIn,
     ApplyResult,
+    CreateMappingOp,
+    DeleteMappingOp,
+    FallbackCount,
+    MappingOp,
+    MappingPlanIn,
     MappingPreview,
-    ProposedMappingIn,
-    RuleImpact,
+    OpImpact,
     SampleChange,
+    SkippedOp,
     UnmappedValuesOut,
+    UpdateMappingOp,
 )
 from app.services.analytics_service import unmapped_summary
 from app.services.ingest_service import _backfill_merchant_raw, run_reclassification
 
 _SAMPLE_CAP = 5
+_OpType = Literal["create", "update", "delete"]
 
 
 @dataclass
-class _RuleAcc:
+class _RowClassified:
+    merchant_raw: str | None
+    cleaned_resolved: str | None
+    new_type: TransactionType | None
+    new_owner_name: str | None
+    new_category: str | None
+    new_merchant: str | None
+    type_match: RuleMatch | None
+    owner_match: RuleMatch | None
+    category_match: RuleMatch | None
+    merchant_match: RuleMatch | None
+
+
+@dataclass
+class _OpAcc:
     index: int
-    rule: ProposedMappingIn
-    spec: RuleSpec
-    duplicate_of_existing_id: int | None
+    op: MappingOp
+    op_type: _OpType
+    spec: RuleSpec | None
+    mapping_id: int | None = None
+    duplicate_of_existing_id: int | None = None
+    conflicts_with_existing_id: int | None = None
+    existing_canonical: str | None = None
+    old_canonical: str | None = None
+    new_canonical: str | None = None
     would_change: int = 0
     suppressed_by_override: int = 0
     shadowed_by_existing: int = 0
+    falls_back_to: dict[int, int] = field(default_factory=dict)
+    would_become_unmapped: int = 0
     samples: list[SampleChange] = field(default_factory=list)
     changed_txn_ids: set[int] = field(default_factory=set)
 
@@ -73,46 +101,216 @@ def find_mapping_by_identity(
     return db.execute(stmt).scalar_one_or_none()
 
 
-def validate_proposed_rule(
-    db: Session, rule: ProposedMappingIn, index: int
-) -> str | None:
+def _cleaned_merchant(merchant: str | None) -> str | None:
+    if merchant is None or not merchant.strip():
+        return None
+    return clean_raw_value(merchant)
+
+
+def _create_spec(op: CreateMappingOp, index: int) -> RuleSpec:
+    return RuleSpec(
+        kind=op.kind,
+        raw_value=clean_raw_value(op.raw_value),
+        canonical_value=op.canonical_value,
+        account_id=op.account_id,
+        merchant=_cleaned_merchant(op.merchant),
+        ref=f"create:{index}",
+    )
+
+
+def _spec_from_row(row: NormalizationMapping, ref: str) -> RuleSpec:
+    return RuleSpec(
+        kind=row.kind,
+        raw_value=row.raw_value,
+        canonical_value=row.canonical_value,
+        account_id=row.account_id,
+        merchant=row.merchant,
+        ref=ref,
+    )
+
+
+def validate_create_op(db: Session, op: CreateMappingOp, index: int) -> str | None:
     """Same checks as POST /mappings; returns a message or None. `index` is 1-based."""
     try:
-        kind = NormalizationKind(rule.kind)
+        kind = NormalizationKind(op.kind)
     except ValueError:
         return (
-            f"rule {index}: kind must be transaction_type, category, owner, or merchant"
+            f"op {index}: kind must be transaction_type, category, owner, or merchant"
         )
     if kind is NormalizationKind.TRANSACTION_TYPE:
         try:
-            TransactionType(rule.canonical_value)
+            TransactionType(op.canonical_value)
         except ValueError:
-            return f"rule {index}: canonical_value must be a TransactionType"
-    if rule.merchant is not None and rule.merchant.strip():
+            return f"op {index}: canonical_value must be a TransactionType"
+    if op.merchant is not None and op.merchant.strip():
         if kind is not NormalizationKind.CATEGORY:
-            return f"rule {index}: merchant only valid for category"
-    if not str(rule.raw_value).strip():
-        return f"rule {index}: raw_value is empty"
-    if rule.account_id is not None and db.get(Account, rule.account_id) is None:
-        return f"rule {index}: account {rule.account_id} not found"
+            return f"op {index}: merchant only valid for category"
+    if not str(op.raw_value).strip():
+        return f"op {index}: raw_value is empty"
+    if op.account_id is not None and db.get(Account, op.account_id) is None:
+        return f"op {index}: account {op.account_id} not found"
     return None
 
 
-def _cleaned_merchant(rule: ProposedMappingIn) -> str | None:
-    if rule.merchant is None or not rule.merchant.strip():
+def _validate_type_canonical(canonical_value: str, kind: str, index: int) -> str | None:
+    if kind != "transaction_type":
         return None
-    return clean_raw_value(rule.merchant)
+    try:
+        TransactionType(canonical_value)
+    except ValueError:
+        return f"op {index}: canonical_value must be a TransactionType"
+    return None
 
 
-def _rule_spec(rule: ProposedMappingIn, index: int) -> RuleSpec:
-    return RuleSpec(
-        kind=rule.kind,
-        raw_value=clean_raw_value(rule.raw_value),
-        canonical_value=rule.canonical_value,
-        account_id=rule.account_id,
-        merchant=_cleaned_merchant(rule),
-        ref=f"proposed:{index}",
-    )
+def parse_plan_ops(
+    db: Session,
+    plan: MappingPlanIn,
+    *,
+    allow_missing_delete: bool = False,
+) -> tuple[list[_OpAcc], list[str]]:
+    """Validate ops. Invalid ones go to errors and are omitted from the acc list."""
+    errors: list[str] = []
+    accs: list[_OpAcc] = []
+    seen_ids: dict[int, int] = {}
+
+    for i, op in enumerate(plan.ops):
+        label = i + 1
+        if isinstance(op, CreateMappingOp):
+            error = validate_create_op(db, op, label)
+            if error is not None:
+                errors.append(error)
+                continue
+            spec = _create_spec(op, i)
+            existing = find_mapping_by_identity(
+                db, spec.kind, spec.raw_value, spec.account_id, spec.merchant
+            )
+            duplicate_of = None
+            conflicts_with = None
+            existing_canonical = None
+            if existing is not None:
+                if existing.canonical_value == spec.canonical_value:
+                    duplicate_of = existing.id
+                else:
+                    conflicts_with = existing.id
+                    existing_canonical = existing.canonical_value
+            accs.append(
+                _OpAcc(
+                    index=i,
+                    op=op,
+                    op_type="create",
+                    spec=spec,
+                    duplicate_of_existing_id=duplicate_of,
+                    conflicts_with_existing_id=conflicts_with,
+                    existing_canonical=existing_canonical,
+                )
+            )
+            continue
+
+        mapping_id = op.mapping_id
+        prior = seen_ids.get(mapping_id)
+        if prior is not None:
+            errors.append(
+                f"op {label}: mapping_id {mapping_id} appears in more than one op"
+            )
+            continue
+        seen_ids[mapping_id] = i
+        row = db.get(NormalizationMapping, mapping_id)
+        if row is None:
+            if allow_missing_delete and isinstance(op, DeleteMappingOp):
+                accs.append(
+                    _OpAcc(
+                        index=i,
+                        op=op,
+                        op_type="delete",
+                        spec=None,
+                        mapping_id=mapping_id,
+                    )
+                )
+                continue
+            errors.append(f"op {label}: mapping {mapping_id} not found")
+            continue
+
+        if isinstance(op, UpdateMappingOp):
+            type_error = _validate_type_canonical(op.canonical_value, row.kind, label)
+            if type_error is not None:
+                errors.append(type_error)
+                continue
+            spec = RuleSpec(
+                kind=row.kind,
+                raw_value=row.raw_value,
+                canonical_value=op.canonical_value,
+                account_id=row.account_id,
+                merchant=row.merchant,
+                ref=f"update:{i}",
+            )
+            accs.append(
+                _OpAcc(
+                    index=i,
+                    op=op,
+                    op_type="update",
+                    spec=spec,
+                    mapping_id=row.id,
+                    old_canonical=row.canonical_value,
+                    new_canonical=op.canonical_value,
+                )
+            )
+            continue
+
+        spec = _spec_from_row(row, ref=f"db:{row.id}")
+        accs.append(
+            _OpAcc(
+                index=i,
+                op=op,
+                op_type="delete",
+                spec=spec,
+                mapping_id=row.id,
+                old_canonical=row.canonical_value,
+            )
+        )
+
+    return accs, errors
+
+
+def _conflict_errors(accs: list[_OpAcc]) -> list[str]:
+    errors: list[str] = []
+    for acc in accs:
+        if acc.conflicts_with_existing_id is None or acc.spec is None:
+            continue
+        errors.append(
+            f"op {acc.index + 1}: conflicts with mapping {acc.conflicts_with_existing_id} "
+            f"(existing canonical {acc.existing_canonical!r}, "
+            f"proposed {acc.spec.canonical_value!r})"
+        )
+    return errors
+
+
+def _db_specs(rows: list[NormalizationMapping]) -> list[RuleSpec]:
+    return [_spec_from_row(row, ref=f"db:{row.id}") for row in rows]
+
+
+def _virtual_specs(
+    db_rows: list[NormalizationMapping], accs: list[_OpAcc]
+) -> list[RuleSpec]:
+    deleted_ids = {acc.mapping_id for acc in accs if acc.op_type == "delete"}
+    updates = {
+        acc.mapping_id: acc for acc in accs if acc.op_type == "update" and acc.spec
+    }
+    specs: list[RuleSpec] = []
+    for row in db_rows:
+        if row.id in deleted_ids:
+            continue
+        updated = updates.get(row.id)
+        if updated is not None and updated.spec is not None:
+            specs.append(updated.spec)
+            continue
+        specs.append(_spec_from_row(row, ref=f"db:{row.id}"))
+    for acc in accs:
+        if acc.op_type != "create" or acc.spec is None:
+            continue
+        if acc.duplicate_of_existing_id is not None or acc.conflicts_with_existing_id:
+            continue
+        specs.append(acc.spec)
+    return specs
 
 
 def _effective_category(txn: Transaction, normalized: str | None) -> str | None:
@@ -176,87 +374,11 @@ def _match_for_kind(
     }[kind]
 
 
-def preview_mappings(
-    db: Session,
-    proposed: list[ProposedMappingIn],
-    account_id: int | None = None,
-) -> MappingPreview:
-    """Recompute classification under proposed rules. Read-only: no writes, no flushes."""
-    validation_errors: list[str] = []
-    accs: list[_RuleAcc] = []
-    for i, rule in enumerate(proposed):
-        error = validate_proposed_rule(db, rule, i + 1)
-        if error is not None:
-            validation_errors.append(error)
-            continue
-        spec = _rule_spec(rule, i)
-        existing = find_mapping_by_identity(
-            db, spec.kind, spec.raw_value, spec.account_id, spec.merchant
-        )
-        accs.append(
-            _RuleAcc(
-                index=i,
-                rule=rule,
-                spec=spec,
-                duplicate_of_existing_id=None if existing is None else existing.id,
-            )
-        )
-
-    if not accs:
-        return MappingPreview(
-            scanned=0,
-            total_would_change=0,
-            rules=[],
-            validation_errors=validation_errors,
-        )
-
-    kinds = {acc.spec.kind for acc in accs}
-    lookup = merged_lookup_from_db(db, [acc.spec for acc in accs], kinds)
-
-    stmt = select(Transaction)
-    if account_id is not None:
-        stmt = stmt.where(Transaction.account_id == account_id)
-    rows = list(db.scalars(stmt).all())
-
-    accounts = {account.id: account for account in db.scalars(select(Account)).all()}
-    owners_by_id = {owner.id: owner.name for owner in db.scalars(select(Owner)).all()}
-    owner_ids_by_name = {name: owner_id for owner_id, name in owners_by_id.items()}
-
-    for txn in rows:
-        _accumulate_row(
-            txn, lookup, accs, accounts, owners_by_id, owner_ids_by_name
-        )
-
-    changed_ids: set[int] = set()
-    impacts: list[RuleImpact] = []
-    for acc in accs:
-        changed_ids.update(acc.changed_txn_ids)
-        impacts.append(
-            RuleImpact(
-                rule=acc.rule,
-                would_change=acc.would_change,
-                suppressed_by_override=acc.suppressed_by_override,
-                shadowed_by_existing=acc.shadowed_by_existing,
-                duplicate_of_existing_id=acc.duplicate_of_existing_id,
-                samples=acc.samples,
-            )
-        )
-    return MappingPreview(
-        scanned=len(rows),
-        total_would_change=len(changed_ids),
-        rules=impacts,
-        validation_errors=validation_errors,
-    )
-
-
-def _accumulate_row(
+def _classify_row(
     txn: Transaction,
     lookup: MergedNormalizationLookup,
-    accs: list[_RuleAcc],
     accounts: dict[int, Account],
-    owners_by_id: dict[int, str],
-    owner_ids_by_name: dict[str, int],
-) -> None:
+) -> _RowClassified:
     merchant_raw = txn.merchant_raw
     if not merchant_raw:
         merchant_raw = _backfill_merchant_raw(txn, accounts.get(txn.account_id))
@@ -308,49 +430,210 @@ def _accumulate_row(
             cleaned_resolved,
         )
 
+    return _RowClassified(
+        merchant_raw=merchant_raw,
+        cleaned_resolved=cleaned_resolved,
+        new_type=new_type,
+        new_owner_name=new_owner_name,
+        new_category=new_category,
+        new_merchant=new_merchant,
+        type_match=type_match,
+        owner_match=owner_match,
+        category_match=category_match,
+        merchant_match=merchant_match,
+    )
+
+
+def preview_mappings(db: Session, plan: MappingPlanIn) -> MappingPreview:
+    """Recompute classification under the plan's virtual rule set. Read-only."""
+    accs, validation_errors = parse_plan_ops(db, plan)
+    if not accs:
+        return MappingPreview(
+            scanned=0,
+            total_would_change=0,
+            ops=[],
+            validation_errors=validation_errors,
+        )
+
+    db_rows = list(db.scalars(select(NormalizationMapping)).all())
+    current_lookup = MergedNormalizationLookup(_db_specs(db_rows))
+    merged_lookup = MergedNormalizationLookup(_virtual_specs(db_rows, accs))
+    has_deletes = any(acc.op_type == "delete" for acc in accs)
+
+    stmt = select(Transaction)
+    if plan.account_id is not None:
+        stmt = stmt.where(Transaction.account_id == plan.account_id)
+    rows = list(db.scalars(stmt).all())
+
+    accounts = {account.id: account for account in db.scalars(select(Account)).all()}
+    owners_by_id = {owner.id: owner.name for owner in db.scalars(select(Owner)).all()}
+    owner_ids_by_name = {name: owner_id for owner_id, name in owners_by_id.items()}
+
+    for txn in rows:
+        merged = _classify_row(txn, merged_lookup, accounts)
+        current = (
+            _classify_row(txn, current_lookup, accounts)
+            if has_deletes
+            else merged
+        )
+        _accumulate_row(
+            txn, merged, current, accs, owners_by_id, owner_ids_by_name
+        )
+
+    changed_ids: set[int] = set()
+    impacts: list[OpImpact] = []
     for acc in accs:
-        if not _rule_in_scope(acc.spec, txn, merchant_raw, cleaned_resolved):
+        changed_ids.update(acc.changed_txn_ids)
+        impacts.append(_impact_from_acc(acc))
+    return MappingPreview(
+        scanned=len(rows),
+        total_would_change=len(changed_ids),
+        ops=impacts,
+        validation_errors=validation_errors,
+    )
+
+
+def _impact_from_acc(acc: _OpAcc) -> OpImpact:
+    return OpImpact(
+        index=acc.index,
+        op=acc.op,
+        would_change=acc.would_change,
+        suppressed_by_override=acc.suppressed_by_override,
+        shadowed_by_existing=acc.shadowed_by_existing,
+        duplicate_of_existing_id=acc.duplicate_of_existing_id,
+        conflicts_with_existing_id=acc.conflicts_with_existing_id,
+        existing_canonical=acc.existing_canonical,
+        old_canonical=acc.old_canonical,
+        new_canonical=acc.new_canonical,
+        falls_back_to=[
+            FallbackCount(mapping_id=mapping_id, count=count)
+            for mapping_id, count in sorted(acc.falls_back_to.items())
+        ],
+        would_become_unmapped=acc.would_become_unmapped,
+        samples=acc.samples,
+    )
+
+
+def _accumulate_row(
+    txn: Transaction,
+    merged: _RowClassified,
+    current: _RowClassified,
+    accs: list[_OpAcc],
+    owners_by_id: dict[int, str],
+    owner_ids_by_name: dict[str, int],
+) -> None:
+    for acc in accs:
+        if acc.op_type == "delete":
+            _accumulate_delete(
+                txn, merged, current, acc, owners_by_id, owner_ids_by_name
+            )
+            continue
+        if acc.duplicate_of_existing_id is not None or acc.conflicts_with_existing_id:
+            continue
+        if acc.spec is None:
+            continue
+        if not _rule_in_scope(
+            acc.spec, txn, merged.merchant_raw, merged.cleaned_resolved
+        ):
             continue
         match = _match_for_kind(
-            acc.spec.kind, type_match, owner_match, category_match, merchant_match
+            acc.spec.kind,
+            merged.type_match,
+            merged.owner_match,
+            merged.category_match,
+            merged.merchant_match,
         )
         if match is None or match.ref != acc.spec.ref:
-            winning_id = _winning_db_id(match)
-            if winning_id is None:
-                continue
-            if acc.duplicate_of_existing_id == winning_id:
-                continue
-            acc.shadowed_by_existing += 1
+            if acc.op_type == "create":
+                winning_id = _winning_db_id(match)
+                if winning_id is None:
+                    continue
+                acc.shadowed_by_existing += 1
             continue
+        _count_change(txn, merged, acc, owners_by_id, owner_ids_by_name)
 
-        stored_diff, suppressed, current_eff, new_eff = _field_delta(
-            acc.spec.kind,
-            txn,
-            new_type,
-            new_owner_name,
-            new_category,
-            new_merchant,
-            merchant_raw,
-            owners_by_id,
-            owner_ids_by_name,
-        )
-        if not stored_diff:
-            continue
-        if suppressed:
-            acc.suppressed_by_override += 1
-            continue
-        acc.would_change += 1
-        acc.changed_txn_ids.add(txn.id)
-        if len(acc.samples) < _SAMPLE_CAP:
-            acc.samples.append(
-                SampleChange(
-                    transaction_id=txn.id,
-                    description=txn.description,
-                    field=acc.spec.kind,  # type: ignore[arg-type]
-                    current_effective=current_eff,
-                    new_effective=new_eff,
-                )
+
+def _accumulate_delete(
+    txn: Transaction,
+    merged: _RowClassified,
+    current: _RowClassified,
+    acc: _OpAcc,
+    owners_by_id: dict[int, str],
+    owner_ids_by_name: dict[str, int],
+) -> None:
+    if acc.spec is None or acc.mapping_id is None:
+        return
+    current_match = _match_for_kind(
+        acc.spec.kind,
+        current.type_match,
+        current.owner_match,
+        current.category_match,
+        current.merchant_match,
+    )
+    if current_match is None or current_match.ref != f"db:{acc.mapping_id}":
+        return
+    merged_match = _match_for_kind(
+        acc.spec.kind,
+        merged.type_match,
+        merged.owner_match,
+        merged.category_match,
+        merged.merchant_match,
+    )
+    if merged_match is not None and (
+        merged_match.ref.startswith("create:") or merged_match.ref.startswith("update:")
+    ):
+        return
+    counted = _count_change(txn, merged, acc, owners_by_id, owner_ids_by_name)
+    if not counted:
+        return
+    if merged_match is None:
+        acc.would_become_unmapped += 1
+        return
+    fallback_id = _winning_db_id(merged_match)
+    if fallback_id is not None:
+        acc.falls_back_to[fallback_id] = acc.falls_back_to.get(fallback_id, 0) + 1
+        return
+    acc.would_become_unmapped += 1
+
+
+def _count_change(
+    txn: Transaction,
+    merged: _RowClassified,
+    acc: _OpAcc,
+    owners_by_id: dict[int, str],
+    owner_ids_by_name: dict[str, int],
+) -> bool:
+    if acc.spec is None:
+        return False
+    stored_diff, suppressed, current_eff, new_eff = _field_delta(
+        acc.spec.kind,
+        txn,
+        merged.new_type,
+        merged.new_owner_name,
+        merged.new_category,
+        merged.new_merchant,
+        merged.merchant_raw,
+        owners_by_id,
+        owner_ids_by_name,
+    )
+    if not stored_diff:
+        return False
+    if suppressed:
+        acc.suppressed_by_override += 1
+        return False
+    acc.would_change += 1
+    acc.changed_txn_ids.add(txn.id)
+    if len(acc.samples) < _SAMPLE_CAP:
+        acc.samples.append(
+            SampleChange(
+                transaction_id=txn.id,
+                description=txn.description,
+                field=acc.spec.kind,  # type: ignore[arg-type]
+                current_effective=current_eff,
+                new_effective=new_eff,
             )
+        )
+    return True
 
 
 def _field_delta(
@@ -400,28 +683,60 @@ class MappingPlanValidationError(ValueError):
         super().__init__("; ".join(errors))
 
 
-def apply_mapping_plan(db: Session, plan: ApplyMappingPlanIn) -> ApplyResult:
-    """Insert approved rules and reclassify. Commits once; rolls back on failure."""
-    errors = [
-        err
-        for i, rule in enumerate(plan.rules)
-        if (err := validate_proposed_rule(db, rule, i + 1)) is not None
-    ]
+def apply_mapping_plan(db: Session, plan: MappingPlanIn) -> ApplyResult:
+    """Apply approved ops and reclassify. Commits once; rolls back on failure."""
+    accs, errors = parse_plan_ops(db, plan, allow_missing_delete=True)
+    errors.extend(_conflict_errors(accs))
     if errors:
         raise MappingPlanValidationError(errors)
 
-    created_mapping_ids: list[int] = []
-    skipped_duplicates: list[ProposedMappingIn] = []
+    created_ids: list[int] = []
+    updated_ids: list[int] = []
+    deleted_ids: list[int] = []
+    skipped: list[SkippedOp] = []
     pending: list[NormalizationMapping] = []
     try:
-        for i, rule in enumerate(plan.rules):
-            spec = _rule_spec(rule, i)
+        for acc in accs:
+            if acc.op_type != "delete" or acc.mapping_id is None:
+                continue
+            row = db.get(NormalizationMapping, acc.mapping_id)
+            if row is None:
+                skipped.append(SkippedOp(op=acc.op, reason="missing"))
+                continue
+            db.delete(row)
+            deleted_ids.append(acc.mapping_id)
+        db.flush()
+
+        for acc in accs:
+            if acc.op_type != "update" or acc.mapping_id is None:
+                continue
+            row = db.get(NormalizationMapping, acc.mapping_id)
+            if row is None:
+                raise MappingPlanValidationError(
+                    [f"op {acc.index + 1}: mapping {acc.mapping_id} not found"]
+                )
+            row.canonical_value = acc.new_canonical or ""
+            updated_ids.append(row.id)
+        db.flush()
+
+        for acc in accs:
+            if acc.op_type != "create" or acc.spec is None:
+                continue
+            spec = acc.spec
             existing = find_mapping_by_identity(
                 db, spec.kind, spec.raw_value, spec.account_id, spec.merchant
             )
             if existing is not None:
-                skipped_duplicates.append(rule)
-                continue
+                if existing.canonical_value == spec.canonical_value:
+                    skipped.append(SkippedOp(op=acc.op, reason="duplicate"))
+                    continue
+                raise MappingPlanValidationError(
+                    [
+                        f"op {acc.index + 1}: conflicts with mapping {existing.id} "
+                        f"(existing canonical {existing.canonical_value!r}, "
+                        f"proposed {spec.canonical_value!r})"
+                    ]
+                )
             row = NormalizationMapping(
                 kind=spec.kind,
                 raw_value=spec.raw_value,
@@ -432,7 +747,7 @@ def apply_mapping_plan(db: Session, plan: ApplyMappingPlanIn) -> ApplyResult:
             db.add(row)
             pending.append(row)
         db.flush()
-        created_mapping_ids = [row.id for row in pending]
+        created_ids = [row.id for row in pending]
 
         reclass = run_reclassification(db, account_id=plan.account_id)
         db.flush()
@@ -443,8 +758,10 @@ def apply_mapping_plan(db: Session, plan: ApplyMappingPlanIn) -> ApplyResult:
         raise
 
     return ApplyResult(
-        created_mapping_ids=created_mapping_ids,
-        skipped_duplicates=skipped_duplicates,
+        created_ids=created_ids,
+        updated_ids=updated_ids,
+        deleted_ids=deleted_ids,
+        skipped=skipped,
         reclass_scanned=reclass.scanned,
         reclass_updated=reclass.updated,
         unmapped_after=UnmappedValuesOut(

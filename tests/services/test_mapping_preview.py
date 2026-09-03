@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import Account, NormalizationMapping, Owner, Transaction
-from app.schemas import ProposedMappingIn
+from app.schemas import CreateMappingOp, DeleteMappingOp, MappingPlanIn, UpdateMappingOp
 from app.services.mapping_preview_service import preview_mappings
 
 
@@ -60,6 +60,14 @@ def _add_mapping(db: Session, **kwargs) -> NormalizationMapping:
     return row
 
 
+def _plan(*ops, account_id=None) -> MappingPlanIn:
+    return MappingPlanIn(ops=list(ops), account_id=account_id)
+
+
+def _create(**kwargs) -> CreateMappingOp:
+    return CreateMappingOp(op="create", **kwargs)
+
+
 def test_preview_is_pure(db_session: Session) -> None:
     _, account = _seed_account(db_session)
     txn = _add_txn(
@@ -91,20 +99,20 @@ def test_preview_is_pure(db_session: Session) -> None:
 
     preview = preview_mappings(
         db_session,
-        [
-            ProposedMappingIn(
+        _plan(
+            _create(
                 kind="category",
                 raw_value="Food & Drink",
                 canonical_value="Dining",
             )
-        ],
+        ),
     )
 
     assert preview.scanned == 1
     assert preview.total_would_change == 1
-    assert preview.rules[0].would_change == 1
-    assert preview.rules[0].samples[0].current_effective == "Food & Drink"
-    assert preview.rules[0].samples[0].new_effective == "Dining"
+    assert preview.ops[0].would_change == 1
+    assert preview.ops[0].samples[0].current_effective == "Food & Drink"
+    assert preview.ops[0].samples[0].new_effective == "Dining"
 
     assert not db_session.new
     assert not db_session.dirty
@@ -172,28 +180,26 @@ def test_preview_gates(db_session: Session) -> None:
 
     preview = preview_mappings(
         db_session,
-        [
-            ProposedMappingIn(
+        _plan(
+            _create(
                 kind="transaction_type",
                 raw_value="Sale",
                 canonical_value="SPEND",
             ),
-            ProposedMappingIn(
+            _create(
                 kind="owner",
                 raw_value="Pat",
                 canonical_value=owner.name,
             ),
-            ProposedMappingIn(
+            _create(
                 kind="category",
                 raw_value="Food & Drink",
                 canonical_value="Dining",
             ),
-        ],
+        ),
     )
 
-    by_kind = {impact.rule.kind: impact for impact in preview.rules}
-    # Only the row with raw_type=Sale is eligible; it is already SPEND so no stored change.
-    # Add a UNKNOWN+Sale case that would change — has-raw-type is UNKNOWN → SPEND.
+    by_kind = {impact.op.kind: impact for impact in preview.ops}  # type: ignore[union-attr]
     assert by_kind["transaction_type"].would_change == 1
     assert by_kind["transaction_type"].samples[0].description == "has-raw-type"
     assert by_kind["owner"].would_change == 1
@@ -260,15 +266,15 @@ def test_preview_shadowing_and_duplicates(db_session: Session) -> None:
 
     shadowed = preview_mappings(
         db_session,
-        [
-            ProposedMappingIn(
+        _plan(
+            _create(
                 kind="category",
                 raw_value="Shopping",
                 canonical_value="Global Shop",
             )
-        ],
+        ),
     )
-    impact = shadowed.rules[0]
+    impact = shadowed.ops[0]
     assert impact.duplicate_of_existing_id is None
     assert impact.shadowed_by_existing == 1
     assert impact.would_change == 1
@@ -277,21 +283,210 @@ def test_preview_shadowing_and_duplicates(db_session: Session) -> None:
 
     duplicate = preview_mappings(
         db_session,
-        [
-            ProposedMappingIn(
+        _plan(
+            _create(
                 kind="category",
                 raw_value="Groceries",
-                canonical_value="Dup",
+                canonical_value="Groceries",
             )
-        ],
+        ),
     )
-    dup = duplicate.rules[0]
+    dup = duplicate.ops[0]
     assert dup.duplicate_of_existing_id == existing_global.id
+    assert dup.conflicts_with_existing_id is None
     assert dup.would_change == 0
     assert dup.suppressed_by_override == 0
     assert dup.shadowed_by_existing == 0
     assert dup.samples == []
     assert existing_account.id != existing_global.id
+
+
+def test_preview_conflict_split(db_session: Session) -> None:
+    _, account = _seed_account(db_session)
+    existing = _add_mapping(
+        db_session,
+        kind="category",
+        raw_value="groceries",
+        canonical_value="Groceries",
+        account_id=None,
+        merchant=None,
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "groceries-row",
+        category_raw="Groceries",
+        category_normalized="Groceries",
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "grocery-row",
+        category_raw="grocery",
+        category_normalized=None,
+    )
+
+    conflict = preview_mappings(
+        db_session,
+        _plan(
+            _create(
+                kind="category",
+                raw_value="groceries",
+                canonical_value="Grocery",
+            )
+        ),
+    )
+    hit = conflict.ops[0]
+    assert hit.conflicts_with_existing_id == existing.id
+    assert hit.existing_canonical == "Groceries"
+    assert hit.duplicate_of_existing_id is None
+    assert hit.would_change == 0
+    assert hit.shadowed_by_existing == 0
+    assert conflict.total_would_change == 0
+
+    mixed = preview_mappings(
+        db_session,
+        _plan(
+            UpdateMappingOp(
+                op="update", mapping_id=existing.id, canonical_value="Grocery"
+            ),
+            _create(kind="category", raw_value="grocery", canonical_value="Grocery"),
+        ),
+    )
+    by_op = {impact.op.op: impact for impact in mixed.ops}
+    update = by_op["update"]
+    create = by_op["create"]
+    assert update.old_canonical == "Groceries"
+    assert update.new_canonical == "Grocery"
+    assert update.would_change == 1
+    assert update.samples[0].description == "groceries-row"
+    assert create.would_change == 1
+    assert create.samples[0].description == "grocery-row"
+    assert mixed.total_would_change == 2
+
+
+def test_preview_update_and_delete_impact(db_session: Session) -> None:
+    _owner, account = _seed_account(db_session)
+    global_rule = _add_mapping(
+        db_session,
+        kind="category",
+        raw_value="shopping",
+        canonical_value="Shopping",
+        account_id=None,
+        merchant=None,
+    )
+    account_rule = _add_mapping(
+        db_session,
+        kind="category",
+        raw_value="shopping",
+        canonical_value="Account Shop",
+        account_id=account.id,
+        merchant=None,
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "acct-hit",
+        category_raw="Shopping",
+        category_normalized="Account Shop",
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "overridden",
+        category_raw="Shopping",
+        category_normalized="Account Shop",
+        category_override="Keep Me",
+    )
+    other_owner = Owner(name="Other2")
+    db_session.add(other_owner)
+    db_session.flush()
+    other = Account(
+        name="Other2",
+        last4="3333",
+        default_owner_id=other_owner.id,
+        source_format="csv",
+        default_mapping={
+            "date_col": "Date",
+            "description_col": "Description",
+            "amount_col": "Amount",
+        },
+    )
+    db_session.add(other)
+    db_session.commit()
+    db_session.refresh(other)
+    _add_txn(
+        db_session,
+        other.id,
+        "global-hit",
+        category_raw="Shopping",
+        category_normalized="Shopping",
+    )
+
+    update_preview = preview_mappings(
+        db_session,
+        _plan(
+            UpdateMappingOp(
+                op="update",
+                mapping_id=account_rule.id,
+                canonical_value="Warehouse",
+            )
+        ),
+    )
+    update = update_preview.ops[0]
+    assert update.old_canonical == "Account Shop"
+    assert update.new_canonical == "Warehouse"
+    assert update.would_change == 1
+    assert update.suppressed_by_override == 1
+    assert update.samples[0].description == "acct-hit"
+
+    delete_preview = preview_mappings(
+        db_session,
+        _plan(DeleteMappingOp(op="delete", mapping_id=account_rule.id)),
+    )
+    delete = delete_preview.ops[0]
+    assert delete.would_change == 1
+    assert delete.suppressed_by_override == 1
+    assert delete.would_become_unmapped == 0
+    assert delete.falls_back_to[0].mapping_id == global_rule.id
+    assert delete.falls_back_to[0].count == 1
+    assert delete.samples[0].description == "acct-hit"
+    assert delete.samples[0].new_effective == "Shopping"
+
+    unmapped_preview = preview_mappings(
+        db_session,
+        _plan(DeleteMappingOp(op="delete", mapping_id=global_rule.id)),
+    )
+    gone = unmapped_preview.ops[0]
+    assert gone.would_become_unmapped == 1
+    assert gone.falls_back_to == []
+    assert gone.samples[0].description == "global-hit"
+
+
+def test_preview_delete_type_reverts_to_unknown(db_session: Session) -> None:
+    _, account = _seed_account(db_session)
+    rule = _add_mapping(
+        db_session,
+        kind="transaction_type",
+        raw_value="sale",
+        canonical_value="SPEND",
+        account_id=None,
+        merchant=None,
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "typed",
+        transaction_type="SPEND",
+        raw_type="Sale",
+    )
+    preview = preview_mappings(
+        db_session, _plan(DeleteMappingOp(op="delete", mapping_id=rule.id))
+    )
+    impact = preview.ops[0]
+    assert impact.would_change == 1
+    assert impact.would_become_unmapped == 1
+    assert impact.samples[0].new_effective == "UNKNOWN"
 
 
 def test_preview_validation_excludes_invalid_and_continues(db_session: Session) -> None:
@@ -305,29 +500,38 @@ def test_preview_validation_excludes_invalid_and_continues(db_session: Session) 
     )
     preview = preview_mappings(
         db_session,
-        [
-            ProposedMappingIn(
+        _plan(
+            _create(
                 kind="merchant",
                 raw_value="x",
                 canonical_value="X",
                 merchant="Nope",
             ),
-            ProposedMappingIn(
+            _create(
                 kind="category",
                 raw_value="Food",
                 canonical_value="Dining",
             ),
-            ProposedMappingIn(
+            _create(
                 kind="transaction_type",
                 raw_value="Sale",
                 canonical_value="NOT_A_TYPE",
             ),
-        ],
+        ),
     )
     assert preview.validation_errors == [
-        "rule 1: merchant only valid for category",
-        "rule 3: canonical_value must be a TransactionType",
+        "op 1: merchant only valid for category",
+        "op 3: canonical_value must be a TransactionType",
     ]
-    assert len(preview.rules) == 1
-    assert preview.rules[0].would_change == 1
-    assert preview.rules[0].rule.canonical_value == "Dining"
+    assert len(preview.ops) == 1
+    assert preview.ops[0].would_change == 1
+    assert preview.ops[0].op.canonical_value == "Dining"  # type: ignore[union-attr]
+
+
+def test_preview_missing_mapping_id_is_validation_error(db_session: Session) -> None:
+    preview = preview_mappings(
+        db_session,
+        _plan(UpdateMappingOp(op="update", mapping_id=999, canonical_value="X")),
+    )
+    assert preview.validation_errors == ["op 1: mapping 999 not found"]
+    assert preview.ops == []

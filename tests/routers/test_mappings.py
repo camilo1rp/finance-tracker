@@ -65,7 +65,11 @@ def test_list_and_delete_mapping(client: TestClient) -> None:
     assert listed.json() == [created]
 
     deleted = client.delete(f"/mappings/{created['id']}")
-    assert deleted.status_code == 204
+    assert deleted.status_code == 200
+    body = deleted.json()
+    assert body["deleted_id"] == created["id"]
+    assert "reclass_scanned" in body
+    assert "reclass_updated" in body
     assert client.get("/mappings").json() == []
     assert client.delete(f"/mappings/{created['id']}").status_code == 404
 
@@ -191,8 +195,9 @@ def test_preview_and_apply_endpoints(client: TestClient, db_session: Session) ->
     db_session.commit()
 
     body = {
-        "rules": [
+        "ops": [
             {
+                "op": "create",
                 "kind": "category",
                 "raw_value": "Food & Drink",
                 "canonical_value": "Dining",
@@ -205,7 +210,7 @@ def test_preview_and_apply_endpoints(client: TestClient, db_session: Session) ->
     payload = preview.json()
     assert payload["scanned"] == 1
     assert payload["total_would_change"] == 1
-    assert payload["rules"][0]["would_change"] == 1
+    assert payload["ops"][0]["would_change"] == 1
     assert client.get("/mappings").json() == []
 
     listed_before = client.get("/transactions", params={"account_id": account_id}).json()
@@ -214,8 +219,10 @@ def test_preview_and_apply_endpoints(client: TestClient, db_session: Session) ->
     applied = client.post("/mappings/apply", json=body)
     assert applied.status_code == 200, applied.text
     result = applied.json()
-    assert len(result["created_mapping_ids"]) == 1
-    assert result["skipped_duplicates"] == []
+    assert len(result["created_ids"]) == 1
+    assert result["updated_ids"] == []
+    assert result["deleted_ids"] == []
+    assert result["skipped"] == []
     assert result["reclass_updated"] == 1
     assert result["unmapped_after"]["categories"] == []
 
@@ -227,16 +234,18 @@ def test_preview_and_apply_endpoints(client: TestClient, db_session: Session) ->
 
     again = client.post("/mappings/apply", json=body)
     assert again.status_code == 200, again.text
-    assert again.json()["created_mapping_ids"] == []
-    assert len(again.json()["skipped_duplicates"]) == 1
+    assert again.json()["created_ids"] == []
+    assert len(again.json()["skipped"]) == 1
+    assert again.json()["skipped"][0]["reason"] == "duplicate"
 
 
 def test_apply_endpoint_rejects_invalid_plan(client: TestClient) -> None:
     response = client.post(
         "/mappings/apply",
         json={
-            "rules": [
+            "ops": [
                 {
+                    "op": "create",
                     "kind": "merchant",
                     "raw_value": "x",
                     "canonical_value": "X",
@@ -247,3 +256,53 @@ def test_apply_endpoint_rejects_invalid_plan(client: TestClient) -> None:
     )
     assert response.status_code == 422
     assert "merchant only valid for category" in str(response.json()["detail"])
+
+
+def test_patch_and_delete_reclassify(client: TestClient, db_session: Session) -> None:
+    account_id = _account(client)
+    created = client.post(
+        "/mappings",
+        json={
+            "kind": "category",
+            "raw_value": "Food & Drink",
+            "canonical_value": "Dining",
+        },
+    ).json()
+    db_session.add(
+        Transaction(
+            account_id=account_id,
+            transaction_date=date(2024, 6, 1),
+            description="COFFEE",
+            amount=Decimal("4.50"),
+            transaction_type="SPEND",
+            is_spend=True,
+            category_raw="Food & Drink",
+            category_normalized="Dining",
+            dedupe_hash="patch-delete-coffee",
+            raw={},
+        )
+    )
+    db_session.commit()
+
+    patched = client.patch(
+        f"/mappings/{created['id']}",
+        json={"canonical_value": "Cafes"},
+    )
+    assert patched.status_code == 200, patched.text
+    body = patched.json()
+    assert body["id"] == created["id"]
+    assert body["canonical_value"] == "Cafes"
+    assert body["reclass_updated"] == 1
+    listed = client.get("/transactions", params={"account_id": account_id}).json()
+    assert listed[0]["category_normalized"] == "Cafes"
+
+    missing = client.patch("/mappings/999999", json={"canonical_value": "X"})
+    assert missing.status_code == 404
+
+    deleted = client.delete(f"/mappings/{created['id']}")
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["deleted_id"] == created["id"]
+    assert deleted.json()["reclass_updated"] == 1
+    listed = client.get("/transactions", params={"account_id": account_id}).json()
+    assert listed[0]["category_normalized"] is None
+    assert client.get("/mappings").json() == []

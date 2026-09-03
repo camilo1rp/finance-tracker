@@ -3,7 +3,8 @@ In-memory NormalizationLookup over a merged rule list (DB + proposed).
 
 Resolves with the same precedence as DbNormalizationLookup so a proposed
 global rule is shadowed by an existing account-scoped rule (and vice versa).
-When two rules share an exact scope, the `db:` rule wins.
+When two rules share an exact scope, the `db:` rule wins over overlay
+refs (`proposed:` or `create:`).
 """
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ class RuleSpec:
     canonical_value: str
     account_id: int | None
     merchant: str | None  # category kind only; None = global merchant scope
-    ref: str  # "db:<mapping_id>" or "proposed:<index>"
+    ref: str  # "db:<mapping_id>", "create:<index>", "update:<index>", or "proposed:<index>"
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,10 @@ def _scope_merchant(merchant: str | None) -> str | None:
     if merchant is None or not str(merchant).strip():
         return None
     return merchant
+
+
+def _is_overlay_ref(ref: str) -> bool:
+    return ref.startswith(("proposed:", "create:"))
 
 
 class MergedNormalizationLookup(NormalizationLookup):
@@ -50,7 +55,7 @@ class MergedNormalizationLookup(NormalizationLookup):
             if existing is None:
                 self._by_scope[key] = rule
                 continue
-            if existing.ref.startswith("proposed:") and rule.ref.startswith("db:"):
+            if _is_overlay_ref(existing.ref) and rule.ref.startswith("db:"):
                 self._by_scope[key] = rule
 
     def resolve(

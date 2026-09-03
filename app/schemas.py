@@ -3,9 +3,9 @@ Pydantic models -- the API's request/response contract.
 """
 from datetime import date
 from decimal import Decimal
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 
 # ---- Owners ----
@@ -45,12 +45,46 @@ class NormalizationMappingOut(BaseModel):
 MappingKind = Literal["transaction_type", "category", "owner", "merchant"]
 
 
-class ProposedMappingIn(BaseModel):
+class CreateMappingOp(BaseModel):
+    op: Literal["create"] = "create"
     kind: MappingKind
     raw_value: str
     canonical_value: str
     account_id: Optional[int] = None
     merchant: Optional[str] = None  # only valid when kind == "category"
+
+
+class UpdateMappingOp(BaseModel):
+    op: Literal["update"] = "update"
+    mapping_id: int
+    canonical_value: str
+
+
+class DeleteMappingOp(BaseModel):
+    op: Literal["delete"] = "delete"
+    mapping_id: int
+
+
+MappingOp = Annotated[
+    Union[CreateMappingOp, UpdateMappingOp, DeleteMappingOp],
+    Field(discriminator="op"),
+]
+_MAPPING_OP_ADAPTER = TypeAdapter(MappingOp)
+
+
+def parse_mapping_op(data: MappingOp | dict) -> MappingOp:
+    if isinstance(data, (CreateMappingOp, UpdateMappingOp, DeleteMappingOp)):
+        return data
+    return _MAPPING_OP_ADAPTER.validate_python(data)
+
+
+class MappingPlanIn(BaseModel):
+    ops: list[MappingOp]
+    account_id: Optional[int] = None  # reclassify / preview scan scope
+
+
+class MappingPatchIn(BaseModel):
+    canonical_value: str
 
 
 class SampleChange(BaseModel):
@@ -61,30 +95,51 @@ class SampleChange(BaseModel):
     new_effective: Optional[str]
 
 
-class RuleImpact(BaseModel):
-    rule: ProposedMappingIn
-    would_change: int
-    suppressed_by_override: int
-    shadowed_by_existing: int
-    duplicate_of_existing_id: Optional[int]
-    samples: list[SampleChange]
+class FallbackCount(BaseModel):
+    mapping_id: int
+    count: int
+
+
+class OpImpact(BaseModel):
+    index: int
+    op: MappingOp
+    would_change: int = 0
+    suppressed_by_override: int = 0
+    shadowed_by_existing: int = 0
+    duplicate_of_existing_id: Optional[int] = None
+    conflicts_with_existing_id: Optional[int] = None
+    existing_canonical: Optional[str] = None
+    old_canonical: Optional[str] = None
+    new_canonical: Optional[str] = None
+    falls_back_to: list[FallbackCount] = []
+    would_become_unmapped: int = 0
+    samples: list[SampleChange] = []
 
 
 class MappingPreview(BaseModel):
     scanned: int
     total_would_change: int
-    rules: list[RuleImpact]
+    ops: list[OpImpact]
     validation_errors: list[str]
 
 
-class MappingPreviewIn(BaseModel):
-    rules: list[ProposedMappingIn]
-    account_id: Optional[int] = None
+class MappingPatchOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    kind: str
+    raw_value: str
+    canonical_value: str
+    account_id: Optional[int]
+    merchant: Optional[str] = None
+    reclass_scanned: int
+    reclass_updated: int
 
 
-class ApplyMappingPlanIn(BaseModel):
-    rules: list[ProposedMappingIn]
-    account_id: Optional[int] = None
+class MappingDeleteOut(BaseModel):
+    deleted_id: int
+    reclass_scanned: int
+    reclass_updated: int
 
 
 # ---- Accounts ----
@@ -127,9 +182,16 @@ class UnmappedValuesOut(BaseModel):
     merchants: list[str] = []
 
 
+class SkippedOp(BaseModel):
+    op: MappingOp
+    reason: Literal["duplicate", "missing"]
+
+
 class ApplyResult(BaseModel):
-    created_mapping_ids: list[int]
-    skipped_duplicates: list[ProposedMappingIn]
+    created_ids: list[int]
+    updated_ids: list[int]
+    deleted_ids: list[int]
+    skipped: list[SkippedOp]
     reclass_scanned: int
     reclass_updated: int
     unmapped_after: UnmappedValuesOut
