@@ -17,44 +17,94 @@ def _config(thread_id: str) -> dict:
     return {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
 
 
+def _op_label(op: dict) -> str:
+    kind_of = op.get("op")
+    if kind_of == "update":
+        return f"update mapping {op.get('mapping_id')} -> {op.get('canonical_value')!r}"
+    if kind_of == "delete":
+        return f"delete mapping {op.get('mapping_id')}"
+    scope = f"account={op.get('account_id')}" if op.get("account_id") else "global"
+    merchant = f"merchant={op.get('merchant')}" if op.get("merchant") else "all merchants"
+    return (
+        f"{op.get('kind')}  {op.get('raw_value')!r} -> "
+        f"{op.get('canonical_value')!r}  ({scope}, {merchant})"
+    )
+
+
+def _impact_line(impact: dict) -> str:
+    op = impact.get("op") or {}
+    kind_of = op.get("op")
+    bits = [
+        f"would_change={impact.get('would_change')}",
+        f"suppressed={impact.get('suppressed_by_override')}",
+    ]
+    if kind_of == "create":
+        bits.append(f"shadowed={impact.get('shadowed_by_existing')}")
+        if impact.get("duplicate_of_existing_id") is not None:
+            bits.append(f"duplicate_of={impact.get('duplicate_of_existing_id')}")
+        if impact.get("conflicts_with_existing_id") is not None:
+            bits.append(
+                f"CONFLICTS with mapping {impact.get('conflicts_with_existing_id')} "
+                f"(existing canonical {impact.get('existing_canonical')!r})"
+            )
+    elif kind_of == "update":
+        bits.append(
+            f"{impact.get('old_canonical')!r} -> {impact.get('new_canonical')!r}"
+        )
+    elif kind_of == "delete":
+        bits.append(f"fallback={impact.get('falls_back_to')}")
+        bits.append(f"unmapped={impact.get('would_become_unmapped')}")
+    return " ".join(bits)
+
+
 def _print_interrupt(payload: dict) -> None:
     print("\n=== Approval needed (nothing applied yet) ===")
     print(f"Rationale: {payload.get('rationale') or '(none)'}")
-    rules = payload.get("rules") or []
-    print("Rules:")
-    for i, rule in enumerate(rules):
-        scope = f"account={rule.get('account_id')}" if rule.get("account_id") else "global"
-        merchant = f" merchant={rule.get('merchant')}" if rule.get("merchant") else "all merchants"
-        print(
-            f"  [{i}] {rule.get('kind')}  {rule.get('raw_value')!r} -> "
-            f"{rule.get('canonical_value')!r}  ({scope}, {merchant})"
-        )
+    ops = payload.get("ops") or []
     preview = payload.get("preview") or {}
+    impacts = {impact.get("index"): impact for impact in preview.get("ops") or []}
+    grouped: dict[str, list[int]] = {"update": [], "delete": [], "create": []}
+    for i, op in enumerate(ops):
+        grouped.setdefault(op.get("op") or "create", []).append(i)
+    conflicts = [
+        i
+        for i, _op in enumerate(ops)
+        if (impacts.get(i) or {}).get("conflicts_with_existing_id") is not None
+    ]
+    if conflicts:
+        print("Conflicts:")
+        for i in conflicts:
+            print(f"  [{i}] {_op_label(ops[i])}  {_impact_line(impacts[i])}")
+    for heading, key in (
+        ("Updates", "update"),
+        ("Deletes", "delete"),
+        ("Creates", "create"),
+    ):
+        conflict_set = set(conflicts)
+        indexes = [i for i in (grouped.get(key) or []) if i not in conflict_set]
+        if not indexes:
+            continue
+        print(f"{heading}:")
+        for i in indexes:
+            extra = f"  {_impact_line(impacts[i])}" if i in impacts else ""
+            print(f"  [{i}] {_op_label(ops[i])}{extra}")
     print(
         f"Preview: scanned={preview.get('scanned')}  "
         f"would_change={preview.get('total_would_change')}  "
         f"errors={preview.get('validation_errors')}"
     )
-    for impact in preview.get("rules") or []:
-        rule = impact.get("rule") or {}
-        print(
-            f"  {rule.get('raw_value')!r}: would_change={impact.get('would_change')} "
-            f"shadowed={impact.get('shadowed_by_existing')} "
-            f"suppressed={impact.get('suppressed_by_override')} "
-            f"duplicate_of={impact.get('duplicate_of_existing_id')}"
-        )
     print("Type: approve | reject | edit 0,2")
 
 
-def _decision(rules: list) -> dict:
+def _decision(ops: list) -> dict:
     line = input("decision> ").strip()
     if line.lower().startswith("reject"):
-        return {"decision": "reject", "rules": []}
+        return {"decision": "reject", "ops": []}
     if line.lower().startswith("edit"):
         _, _, rest = line.partition(" ")
         idxs = [int(part.strip()) for part in rest.split(",") if part.strip()]
-        return {"decision": "approve", "rules": [rules[i] for i in idxs]}
-    return {"decision": "approve", "rules": rules}
+        return {"decision": "approve", "ops": [ops[i] for i in idxs]}
+    return {"decision": "approve", "ops": ops}
 
 
 def _print_last_ai(result: dict, prefix: str) -> None:
@@ -68,7 +118,7 @@ def _print_last_ai(result: dict, prefix: str) -> None:
 
 def _handle_interrupt(graph, config: dict, payload: dict) -> dict:
     _print_interrupt(payload)
-    return graph.invoke(Command(resume=_decision(payload.get("rules") or [])), config)
+    return graph.invoke(Command(resume=_decision(payload.get("ops") or [])), config)
 
 
 def _run_until_idle(graph, payload, config: dict, prefix: str) -> None:
@@ -123,7 +173,7 @@ def main(argv: list[str] | None = None) -> None:
             _print_interrupt(payload)
             _run_until_idle(
                 graph,
-                Command(resume=_decision(payload.get("rules") or [])),
+                Command(resume=_decision(payload.get("ops") or [])),
                 config,
                 prefix,
             )

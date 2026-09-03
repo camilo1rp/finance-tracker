@@ -5,9 +5,9 @@ from sqlalchemy.orm import Session
 
 from app.agent.config import in_memory_checkpointer
 from app.agent.steward_graph import build_steward_builder, build_steward_graph
-from app.schemas import ProposedMappingIn
+from app.schemas import CreateMappingOp
 from tests.agent.helpers import (
-    RULES,
+    OPS,
     ScriptedChatModel,
     agent_sessions,
     capture_apply,
@@ -34,7 +34,7 @@ def test_steward_interrupt_flow(
                 tool_calls=[
                     {
                         "name": "preview_mapping_rules",
-                        "args": {"rules": RULES, "account_id": None},
+                        "args": {"ops": OPS, "account_id": None},
                         "id": "call-2",
                     }
                 ],
@@ -45,7 +45,7 @@ def test_steward_interrupt_flow(
                     {
                         "name": "submit_plan",
                         "args": {
-                            "rules": RULES,
+                            "ops": OPS,
                             "account_id": None,
                             "rationale": "map remaining categories",
                         },
@@ -68,17 +68,17 @@ def test_steward_interrupt_flow(
     payload = interrupts[0].value
     assert payload["preview"] is not None
     assert payload["rationale"] == "map remaining categories"
-    assert len(payload["rules"]) == 2
+    assert len(payload["ops"]) == 2
 
-    subset = [payload["rules"][0]]
+    subset = [payload["ops"][0]]
     resumed = graph.invoke(
-        Command(resume={"decision": "approve", "rules": subset}),
+        Command(resume={"decision": "approve", "ops": subset}),
         config,
     )
     assert "plan" in captured
-    received = captured["plan"].rules
-    assert [rule.model_dump() for rule in received] == [
-        ProposedMappingIn.model_validate(subset[0]).model_dump()
+    received = captured["plan"].ops
+    assert [op.model_dump() for op in received] == [
+        CreateMappingOp.model_validate(subset[0]).model_dump()
     ]
     assert received[0].raw_value == "Food & Drink"
     assert len(received) == 1
@@ -86,7 +86,7 @@ def test_steward_interrupt_flow(
     state = graph.get_state(config)
     apply_result = state.values.get("apply_result")
     assert apply_result is not None
-    assert apply_result["created_mapping_ids"] == [1]
+    assert apply_result["created_ids"] == [1]
     assert apply_result["reclass_updated"] == 1
     assert not resumed.get("__interrupt__")
 

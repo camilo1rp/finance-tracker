@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent.config import set_session_factory
 from app.models import Account, Owner, Transaction
-from app.schemas import ApplyMappingPlanIn, ApplyResult, UnmappedValuesOut
+from app.schemas import MappingPlanIn, ApplyResult, UnmappedValuesOut
 
 
 class ScriptedChatModel(FakeMessagesListChatModel):
@@ -35,13 +35,23 @@ def tool_names(result: dict) -> list[str]:
     return names
 
 
-RULES = [
-    {"kind": "category", "raw_value": "Food & Drink", "canonical_value": "Dining"},
-    {"kind": "category", "raw_value": "Shopping", "canonical_value": "Shopping"},
+OPS = [
+    {
+        "op": "create",
+        "kind": "category",
+        "raw_value": "Food & Drink",
+        "canonical_value": "Dining",
+    },
+    {
+        "op": "create",
+        "kind": "category",
+        "raw_value": "Shopping",
+        "canonical_value": "Shopping",
+    },
 ]
 
-RULES_A = [RULES[0]]
-RULES_B = [RULES[1]]
+OPS_A = [OPS[0]]
+OPS_B = [OPS[1]]
 
 
 @pytest.fixture()
@@ -89,8 +99,10 @@ def seed_coffee(db: Session) -> None:
 
 def fake_apply_result() -> ApplyResult:
     return ApplyResult(
-        created_mapping_ids=[1],
-        skipped_duplicates=[],
+        created_ids=[1],
+        updated_ids=[],
+        deleted_ids=[],
+        skipped=[],
         reclass_scanned=1,
         reclass_updated=1,
         unmapped_after=UnmappedValuesOut(
@@ -102,10 +114,10 @@ def fake_apply_result() -> ApplyResult:
     )
 
 
-def capture_apply(monkeypatch: pytest.MonkeyPatch) -> dict[str, ApplyMappingPlanIn]:
-    captured: dict[str, ApplyMappingPlanIn] = {}
+def capture_apply(monkeypatch: pytest.MonkeyPatch) -> dict[str, MappingPlanIn]:
+    captured: dict[str, MappingPlanIn] = {}
 
-    def fake_apply(_db: Session, plan: ApplyMappingPlanIn) -> ApplyResult:
+    def fake_apply(_db: Session, plan: MappingPlanIn) -> ApplyResult:
         captured["plan"] = plan
         return fake_apply_result()
 

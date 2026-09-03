@@ -27,11 +27,13 @@ def _last_text(result: dict) -> str:
 def _steward_summary(result: dict) -> str:
     apply_result = result.get("apply_result")
     if apply_result:
-        skipped = apply_result.get("skipped_duplicates") or []
+        skipped = apply_result.get("skipped") or []
         return (
             "applied "
-            f"created_mapping_ids={apply_result.get('created_mapping_ids')} "
-            f"skipped_duplicates={len(skipped)} "
+            f"created_ids={apply_result.get('created_ids')} "
+            f"updated_ids={apply_result.get('updated_ids')} "
+            f"deleted_ids={apply_result.get('deleted_ids')} "
+            f"skipped={skipped} "
             f"reclass_scanned={apply_result.get('reclass_scanned')} "
             f"reclass_updated={apply_result.get('reclass_updated')}"
         )

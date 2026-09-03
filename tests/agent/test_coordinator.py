@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.agent.config import in_memory_checkpointer
 from app.agent.coordinator import build_coordinator
 from tests.agent.helpers import (
-    RULES,
+    OPS,
     ScriptedChatModel,
     agent_sessions,
     capture_apply,
@@ -161,7 +161,7 @@ def test_steward_interrupt_propagates_to_coordinator(
                 ],
             ),
             AIMessage(
-                content="Applied created_mapping_ids=[1] reclass_updated=1. Unmapped categories are clear."
+                content="Applied created_ids=[1] reclass_updated=1. Unmapped categories are clear."
             ),
         ]
     )
@@ -173,7 +173,7 @@ def test_steward_interrupt_propagates_to_coordinator(
                     {
                         "name": "submit_plan",
                         "args": {
-                            "rules": RULES,
+                            "ops": OPS,
                             "account_id": None,
                             "rationale": "map remaining categories",
                         },
@@ -197,20 +197,23 @@ def test_steward_interrupt_propagates_to_coordinator(
     payload = interrupts[0].value
     assert payload["rationale"] == "map remaining categories"
     assert payload["preview"] is not None
-    by_raw = {impact["rule"]["raw_value"]: impact for impact in payload["preview"]["rules"]}
+    by_raw = {
+        (impact.get("op") or {}).get("raw_value"): impact
+        for impact in payload["preview"]["ops"]
+    }
     assert by_raw["Food & Drink"]["would_change"] == 1
     assert by_raw["Shopping"]["would_change"] == 0
 
-    subset = [payload["rules"][0]]
+    subset = [payload["ops"][0]]
     resumed = graph.invoke(
-        Command(resume={"decision": "approve", "rules": subset}),
+        Command(resume={"decision": "approve", "ops": subset}),
         config,
     )
     assert "plan" in captured
-    assert captured["plan"].rules[0].raw_value == "Food & Drink"
-    assert len(captured["plan"].rules) == 1
+    assert captured["plan"].ops[0].raw_value == "Food & Drink"
+    assert len(captured["plan"].ops) == 1
     assert not resumed.get("__interrupt__")
-    assert "created_mapping_ids=[1]" in (resumed["messages"][-1].content or "")
+    assert "created_ids=[1]" in (resumed["messages"][-1].content or "")
     assert "reclass_updated=1" in (resumed["messages"][-1].content or "")
 
 

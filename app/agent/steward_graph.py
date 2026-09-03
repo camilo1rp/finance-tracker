@@ -11,49 +11,49 @@ from langgraph.types import Command, interrupt
 from app.agent.schemas import StewardState
 from app.agent.tools import STEWARD_AGENT_TOOLS
 from app.agent.config import model_name, tool_session
-from app.schemas import ApplyMappingPlanIn, ProposedMappingIn
+from app.schemas import MappingOp, MappingPlanIn, parse_mapping_op
 from app.services.mapping_preview_service import apply_mapping_plan, preview_mappings
 
 STEWARD_PROMPT = """You clean up normalization mappings.
-Workflow: fetch unmapped values → inspect examples → propose rules → always preview before submitting → submit the plan with the preview attached.
+Workflow: fetch unmapped values → list_mappings for the kind (global, plus the account scope if relevant) → inspect examples → propose ops → always preview before submitting → submit the plan with the preview attached.
 Never claim anything was applied; applying happens only after a human approves.
+
+If preview reports conflicts_with_existing_id, submit an update on that mapping_id — never resubmit the create. Collapsing near-duplicate canonicals (e.g. Grocery/Groceries) is an update on the existing rule plus creates for other raw keys.
+
+After execute, report created_ids, updated_ids, deleted_ids, and reclass_updated verbatim. If reclass_updated is 0 when changes were expected, say so explicitly; do not claim rows were updated.
 """
 
 
 def _route_after_steward(state: StewardState) -> Literal["human_approval", "__end__"]:
-    if state.get("proposed_rules"):
+    if state.get("proposed_ops"):
         return "human_approval"
     return "__end__"
 
 
-def _as_proposed_rules(rules: list) -> list[ProposedMappingIn]:
-    parsed: list[ProposedMappingIn] = []
-    for rule in rules:
-        if isinstance(rule, ProposedMappingIn):
-            parsed.append(rule)
-        else:
-            parsed.append(ProposedMappingIn.model_validate(rule))
-    return parsed
+def _as_ops(ops: list) -> list[MappingOp]:
+    return [parse_mapping_op(op) for op in ops]
 
 
-def _recompute_preview(rules: list, account_id: int | None) -> dict:
-    """Fresh preview for `rules`. Opens a short-lived session; never call across interrupt()."""
-    parsed = _as_proposed_rules(rules)
+def _recompute_preview(ops: list, account_id: int | None) -> dict:
+    """Fresh preview for `ops`. Opens a short-lived session; never call across interrupt()."""
+    parsed = _as_ops(ops)
     with tool_session() as db:
-        preview = preview_mappings(db, parsed, account_id=account_id)
+        preview = preview_mappings(
+            db, MappingPlanIn(ops=parsed, account_id=account_id)
+        )
     return preview.model_dump(mode="json")
 
 
 def human_approval(state: StewardState) -> Command[Literal["steward", "execute"]]:
-    submitted = state.get("proposed_rules") or []
+    submitted = state.get("proposed_ops") or []
     account_scope = state.get("account_scope")
-    # Recompute from the rules actually in state. Do not trust pending_preview:
+    # Recompute from the ops actually in state. Do not trust pending_preview:
     # the model can submit a different set than it last previewed, or skip preview.
     # Close the session before interrupt() — this node restarts on resume and the
     # graph may sit paused for hours.
     preview = _recompute_preview(submitted, account_scope)
     payload = {
-        "rules": submitted,
+        "ops": submitted,
         "preview": preview,
         "rationale": state.get("rationale"),
     }
@@ -64,7 +64,7 @@ def human_approval(state: StewardState) -> Command[Literal["steward", "execute"]
         return Command(
             goto="steward",
             update={
-                "proposed_rules": [],
+                "proposed_ops": [],
                 "pending_preview": None,
                 "rationale": None,
                 "messages": [
@@ -74,40 +74,47 @@ def human_approval(state: StewardState) -> Command[Literal["steward", "execute"]
                 ],
             },
         )
-    rules = decision.get("rules")
-    if rules is None:
-        rules = submitted
-    # Evidence for exactly the subset that will run.
-    subset_preview = _recompute_preview(rules, account_scope)
+    ops = decision.get("ops")
+    if ops is None:
+        ops = submitted
+    subset_preview = _recompute_preview(ops, account_scope)
     return Command(
         goto="execute",
-        update={"proposed_rules": rules, "pending_preview": subset_preview},
+        update={"proposed_ops": ops, "pending_preview": subset_preview},
     )
 
 
+def _format_skipped(skipped: list) -> str:
+    parts: list[str] = []
+    for item in skipped:
+        op = item.op
+        parts.append(f"{op.op}:{item.reason}")
+    return str(parts)
+
+
 def execute(state: StewardState) -> Command[Literal["steward"]]:
-    rules = [
-        ProposedMappingIn.model_validate(rule)
-        for rule in (state.get("proposed_rules") or [])
-    ]
+    parsed = _as_ops(state.get("proposed_ops") or [])
     with tool_session() as db:
         result = apply_mapping_plan(
             db,
-            ApplyMappingPlanIn(rules=rules, account_id=state.get("account_scope")),
+            MappingPlanIn(ops=parsed, account_id=state.get("account_scope")),
         )
     summary = (
-        f"Plan executed. created_mapping_ids={result.created_mapping_ids} "
-        f"skipped_duplicates={len(result.skipped_duplicates)} "
+        f"Plan executed. created_ids={result.created_ids} "
+        f"updated_ids={result.updated_ids} "
+        f"deleted_ids={result.deleted_ids} "
+        f"skipped={_format_skipped(result.skipped)} "
         f"reclass_scanned={result.reclass_scanned} "
         f"reclass_updated={result.reclass_updated}. "
         "Nothing else will be applied unless a new plan is submitted. "
-        "Re-check unmapped values if useful, then tell the user what changed."
+        "Report created_ids, updated_ids, deleted_ids, and reclass_updated verbatim. "
+        "If reclass_updated is 0, say so explicitly; do not claim rows were updated."
     )
     return Command(
         goto="steward",
         update={
             "apply_result": result.model_dump(),
-            "proposed_rules": [],
+            "proposed_ops": [],
             "pending_preview": None,
             "rationale": None,
             "messages": [HumanMessage(content=summary)],
