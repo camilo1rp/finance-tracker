@@ -18,7 +18,12 @@ from app.agent.config import (
 )
 from app.domain.email_source import EmailQuery, parse_allowlist
 from app.integrations.gmail_mcp.mapping import build_search_query
-from app.integrations.gmail_mcp.transport import ALLOWED_TOOLS, StreamableHttpMcpTransport
+from app.integrations.gmail_mcp.transport import (
+    ALLOWED_TOOLS,
+    StreamableHttpMcpTransport,
+    invoke_mcp,
+    tool_result_as_dict,
+)
 
 OUTPUT_PATH = Path("docs/email-enrichment/spike-output.md")
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -43,10 +48,31 @@ def _id_meta(value: object) -> dict[str, object]:
     return {"length": len(text), "charset": _charset(text)}
 
 
-def _redact_preview(text: str, limit: int = 80) -> str:
+def _redact_text(text: str) -> str:
     cleaned = _EMAIL_RE.sub("[email]", text)
-    cleaned = _DIGIT_RE.sub("#", cleaned)
-    return cleaned[:limit]
+    return _DIGIT_RE.sub("#", cleaned)
+
+
+def _redact_preview(text: str, limit: int = 80) -> str:
+    return _redact_text(text)[:limit]
+
+
+def _tool_error_text(result) -> str:
+    texts: list[str] = []
+    for item in getattr(result, "content", None) or []:
+        text = getattr(item, "text", None)
+        if text:
+            texts.append(text)
+    structured = getattr(result, "structuredContent", None)
+    if structured:
+        texts.append(str(structured))
+    return "\n".join(texts).strip()
+
+
+def _write_output(lines: list[str]) -> None:
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT_PATH.write_text("\n".join(lines) + "\n")
+    print(f"\nWrote {OUTPUT_PATH}")
 
 
 def _shape(value, *, depth: int = 0):
@@ -82,6 +108,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--from", dest="senders", help="Comma-separated senders; default EMAIL_SENDER_ALLOWLIST")
     parser.add_argument("--after", required=True, help="Inclusive start date YYYY-MM-DD")
     parser.add_argument("--before", required=True, help="Inclusive end date YYYY-MM-DD")
+    parser.add_argument("--query", help="Raw Gmail query; bypasses the query builder")
     return parser.parse_args(argv)
 
 
@@ -90,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     date_from = date.fromisoformat(args.after)
     date_to = date.fromisoformat(args.before)
     senders = parse_allowlist(args.senders or email_sender_allowlist())
-    if not senders:
+    if not senders and not args.query:
         print("No senders: pass --from or set EMAIL_SENDER_ALLOWLIST", file=sys.stderr)
         return 1
 
@@ -112,20 +139,44 @@ def main(argv: list[str] | None = None) -> int:
     missing = [name for name in sorted(ALLOWED_TOOLS) if name not in names]
     if missing:
         print("MISSING allowed tools:", missing, file=sys.stderr)
+        _write_output(lines)
         return 1
     by_name = {str(item["name"]): item.get("input_schema_keys") or [] for item in detailed}
     for name in sorted(ALLOWED_TOOLS):
         keys = by_name.get(name) or []
         print(f"  {name} input properties: {keys}")
         lines.append(f"- {name} input_schema_keys: {keys}")
+    _write_output(lines)
 
-    query = EmailQuery(senders=senders, date_from=date_from, date_to=date_to, max_results=5)
-    gmail_query = build_search_query(query)
+    if args.query:
+        gmail_query = args.query
+    else:
+        query = EmailQuery(senders=senders, date_from=date_from, date_to=date_to, max_results=5)
+        gmail_query = build_search_query(query)
     print("\n== 2. search_threads ==")
-    result = transport.call_tool(
-        "search_threads",
-        {"query": gmail_query, "pageSize": 5, "view": "THREAD_VIEW_MINIMAL"},
-    )
+    print("gmail_query:", gmail_query)
+
+    async def _search(session):
+        return await session.call_tool(
+            "search_threads",
+            {"query": gmail_query, "pageSize": 5, "view": "THREAD_VIEW_MINIMAL"},
+        )
+
+    raw_search = invoke_mcp(transport.url, transport._headers(), transport.timeout_s, _search)
+    if getattr(raw_search, "isError", False):
+        error_text = _redact_text(_tool_error_text(raw_search))
+        print("isError:", error_text)
+        lines.extend(
+            [
+                "",
+                "## 2. search_threads",
+                f"- gmail_query: `{_redact_text(gmail_query)}`",
+                f"- isError: `{error_text}`",
+            ]
+        )
+        _write_output(lines)
+        return 1
+    result = tool_result_as_dict(raw_search)
     threads = result.get("threads") or []
     date_formats: set[str] = set()
     sender_kinds: set[str] = set()
@@ -152,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
         [
             "",
             "## 2. search_threads",
+            f"- gmail_query: `{_redact_text(gmail_query)}`",
             f"- response_shape: `{_shape(result)}`",
             f"- thread_count: {len(threads)}",
             f"- message_count: {message_count}",
@@ -239,9 +291,7 @@ def main(argv: list[str] | None = None) -> int:
         ]
     )
 
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text("\n".join(lines) + "\n")
-    print(f"\nWrote {OUTPUT_PATH}")
+    _write_output(lines)
     return 0
 
 
