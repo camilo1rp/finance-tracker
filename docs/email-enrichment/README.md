@@ -1,6 +1,6 @@
 # Email enrichment — closing summary
 
-Delivered across Tasks 00–03 and 02C, suite at 253 passing + 2 deselected live tests (`live_gmail`, `live_gmail_rest`).
+Delivered across Tasks 00–03 and 02C, 12 commits, suite at 253 passed + 2 deselected.
 
 ## What exists
 
