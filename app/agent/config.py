@@ -90,6 +90,10 @@ def extraction_model_name() -> str:
     return os.environ.get("EXTRACTION_MODEL", "")
 
 
+def enricher_model_name() -> str:
+    return os.environ.get("ENRICHER_MODEL") or model_name()
+
+
 def email_mcp_url() -> str:
     return os.environ.get("EMAIL_MCP_URL", DEFAULT_EMAIL_MCP_URL)
 

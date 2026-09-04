@@ -33,6 +33,7 @@ class StewardState(AgentState):
     pending_preview: NotRequired[dict | None]
     apply_result: NotRequired[dict | None]
     rationale: NotRequired[str | None]
+    proposal_id: NotRequired[int]
 
 
 class EnricherState(AgentState):

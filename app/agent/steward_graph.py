@@ -13,6 +13,7 @@ from app.agent.tools import STEWARD_AGENT_TOOLS
 from app.agent.config import model_name, tool_session
 from app.schemas import MappingOp, MappingPlanIn, parse_mapping_op
 from app.services.mapping_preview_service import apply_mapping_plan, preview_mappings
+from app.services.proposal_service import mark_consumed
 
 STEWARD_PROMPT = """You clean up normalization mappings.
 Workflow: fetch unmapped values → list_mappings for the kind (global, plus the account scope if relevant) → inspect examples → propose ops → always preview before submitting → submit the plan with the preview attached.
@@ -24,6 +25,8 @@ If preview reports conflicts_with_existing_id, submit an update on that mapping_
 For transaction-specific corrections, use `set_transaction_category` only when a rule would be wrong because the change applies to one specific transaction, not the broader raw value. Cite `evidence_ids` when they exist. If preview shows `replace_conflict`, do not submit that plan — either drop the op or submit `remove_transaction_override` for that transaction earlier in the same plan and re-preview.
 
 After execute, report created_ids, updated_ids, deleted_ids, and reclass_updated verbatim. If reclass_updated is 0 when changes were expected, say so explicitly; do not claim rows were updated.
+
+When the task references a proposal id, call load_proposal first, preview the ops as given, drop or precede with remove_transaction_override any op the preview marks replace_conflict, do not add ops that are not in the proposal unless the task says so, and mention new_categories in the rationale so the approver sees them.
 """
 
 
@@ -102,6 +105,12 @@ def execute(state: StewardState) -> Command[Literal["steward"]]:
             db,
             MappingPlanIn(ops=parsed, account_id=state.get("account_scope")),
         )
+        proposal_id = state.get("proposal_id")
+        if proposal_id is not None:
+            # Same session as apply. apply_mapping_plan already committed;
+            # mark_consumed is a short follow-up write on this session.
+            mark_consumed(db, proposal_id, f"execute:{proposal_id}")
+            db.commit()
     summary = (
         f"Plan executed. created_ids={result.created_ids} "
         f"updated_ids={result.updated_ids} "

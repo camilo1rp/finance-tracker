@@ -9,10 +9,10 @@ Planning reference for `finance-tracker-skeleton`. Derived from source and tests
 | Generated | 2026-09-03 |
 | Branch | `main` |
 | HEAD SHA | (post Gmail MCP adapter) |
-| Working tree | Email enrichment + enricher subagent (proposals; coordinator routing in 03B) |
+| Working tree | Email enrichment + enricher subagent + coordinator routing |
 | Python (venv) | 3.14.5 (Studio requires ≥3.11 and &lt;3.14; use Dockerfile 3.12 or a 3.11–3.13 venv) |
 | Dockerfile base | `python:3.12-slim` |
-| Tests | **212 passed**, 1 deselected (`live_gmail`) (`pytest -q`) |
+| Tests | **217 passed**, 1 deselected (`live_gmail`) (`pytest -q`) |
 
 ### Reconciled counts
 
@@ -20,9 +20,9 @@ Planning reference for `finance-tracker-skeleton`. Derived from source and tests
 |---|---|
 | HTTP app endpoints | **24** (health 1 + accounts 2 + owners 2 + mappings 6 + imports 1 + transactions 3 + analytics 9). Excludes FastAPI `/docs`, `/redoc`, `/openapi.json`. |
 | Tables | **9** (`owners`, `accounts`, `normalization_mappings`, `import_batches`, `transactions`, `transaction_evidence`, `merchant_senders`, `transaction_overrides`, `enrichment_proposals`) |
-| Agent tools | **19** (16 read / 2 gate-or-delegate / 1 observation-cache submit; **0** DB-apply tools) |
-| Graphs in `langgraph.json` | **3** (`coordinator`, `steward`, `analyst`); enricher builder exists, Studio wiring in 03B |
-| Tests passing | **212** (+ 1 deselected `live_gmail`) |
+| Agent tools | **21** (17 read / 3 gate-or-delegate / 1 observation-cache submit; **0** DB-apply tools) |
+| Graphs in `langgraph.json` | **4** (`coordinator`, `steward`, `analyst`, `enricher`) |
+| Tests passing | **217** (+ 1 deselected `live_gmail`) |
 
 ### Versions
 
@@ -61,7 +61,7 @@ Three layers:
 
 1. **FastAPI CRUD/analytics** — owners, accounts, mappings, imports, transactions, analytics. Run: `docker compose up --build` (uvicorn on `:8000`) or `uvicorn app.main:app`. App factory `app/main.py::create_app`; `lifespan` calls `app/database.py::init_db`.
 2. **Staged CSV ingest + normalization** — `TransactionSource.fetch` → `normalize_rows` (classify via `NormalizationLookup`) → `compute_dedupe_hash` / `split_new_and_duplicates` → persist. HTTP: `POST /imports`. Orchestrator: `app/services/ingest_service.py::ingest_from_source`.
-3. **LangGraph multi-agent** — coordinator (entrypoint) → tools + `ask_analyst` / `run_data_steward`; steward graph `propose → preview → interrupt → apply`. Run: `python -m app.agent.cli [thread_id]` or `--steward`. Recursion limit 25 (`app/agent/cli.py::RECURSION_LIMIT`). **Studio:** `make studio` / `langgraph dev` via `langgraph.json` (three graphs). **Tracing:** optional LangSmith env vars; CLI passes `run_name`/`tags`/metadata on invoke and resume.
+3. **LangGraph multi-agent** — coordinator (entrypoint) → tools + `ask_analyst` / `run_data_steward` / `run_enricher`; steward graph `propose → preview → interrupt → apply`; enricher graph `research → submit_recommendation`. Run: `python -m app.agent.cli [thread_id]` or `--steward` / `--enricher "<task>"`. Recursion limit 25 (`app/agent/cli.py::RECURSION_LIMIT`); enricher invoke uses 15. **Studio:** `make studio` / `langgraph dev` via `langgraph.json` (four graphs). **Tracing:** optional LangSmith env vars; CLI passes `run_name`/`tags`/metadata on invoke and resume.
 
 Tests: `pytest` (`pytest.ini`: `pythonpath=.`, `testpaths=tests`). SQLite in-process; scripted fake chat models; no live LLM.
 
@@ -78,7 +78,7 @@ finance-tracker-skeleton/
 ├── AGENT-QA.md                  # live-model CLI sitting (may be stale)
 ├── Dockerfile                   # python:3.12-slim; pip install; uvicorn app.main:app
 ├── Makefile                     # make studio → langgraph dev
-├── langgraph.json               # Studio graphs: coordinator, steward, analyst
+├── langgraph.json               # Studio graphs: coordinator, steward, analyst, enricher
 ├── QA.md                        # Chase+Apple HTTP import sitting (may be stale)
 ├── README.md                    # API + agent CLI + Observability
 ├── STRUCTURE.md                 # tree + agent notes
@@ -123,7 +123,7 @@ finance-tracker-skeleton/
 ├── app/routers/transactions.py
 ├── app/routers/analytics.py
 ├── app/agent/__init__.py
-├── app/agent/cli.py             # REPL; approve/reject/edit; resume by thread_id; trace config
+├── app/agent/cli.py             # REPL; approve/reject/edit; --enricher; resume by thread_id; trace config
 ├── app/agent/studio.py          # LangGraph Studio factories (no compile-time checkpointer)
 ├── app/agent/coordinator.py     # outer create_agent; checkpointer required for CLI
 ├── app/agent/analyst.py         # read-only create_agent; no checkpointer
@@ -136,7 +136,7 @@ finance-tracker-skeleton/
 ├── app/agent/tools/read.py      # owners/accounts/mappings/txns + analytics tools
 ├── app/agent/tools/steward.py   # preview_mapping_rules, submit_plan (no apply)
 ├── app/agent/tools/enricher.py  # find_receipts / get_evidence / submit_recommendation
-├── app/agent/tools/subagents.py # ask_analyst, run_data_steward wrappers
+├── app/agent/tools/subagents.py # ask_analyst, run_data_steward, run_enricher wrappers
 ├── scripts/verify_api.py        # HTTP walkthrough (TestClient or --base-url)
 ├── scripts/gmail_mcp_spike.py   # owner-run live Gmail MCP probe (redacts before disk)
 ├── scripts/fixtures/*.csv       # Chase/Apple/dirty/dupes/sign_only sample files
@@ -156,7 +156,7 @@ finance-tracker-skeleton/
 
 **In STRUCTURE.md, absent from disk:** none (listed paths exist). STRUCTURE's agent note about compiling without a checkpointer is directionally right for nested steward; analyst is not a compiled subgraph of the coordinator — it is a tool that `invoke`s a separate graph (see §8).
 
-**`langgraph.json`:** on disk at repo root; three graphs via `app/agent/studio.py` factories.
+**`langgraph.json`:** on disk at repo root; four graphs via `app/agent/studio.py` factories.
 
 ---
 
@@ -343,8 +343,8 @@ No FK to transactions: a proposal may reference several. Written by `submit_reco
 | id | Integer PK | no | |
 | task | Text | no | task string the enricher received |
 | recommendation | JSON | no | validated `EnrichmentRecommendation` dump |
-| status | String | no | `ProposalStatus` value; this slice writes `open` only |
-| consumed_plan_ref | String | yes | set when a steward plan consumes the proposal (Part B) |
+| status | String | no | `ProposalStatus` value; `open` at submit, `consumed` after steward execute |
+| consumed_plan_ref | String | yes | set by `mark_consumed` in execute (`execute:<proposal_id>`) |
 | created_at | DateTime | no | UTC-now default |
 
 ### 3.11 Enums (verbatim value sets)
@@ -591,7 +591,7 @@ All except `/unmapped` and `/search` default `spend_only=True`. All except `/unm
 | `ProposedOverride` | `transaction_id`, `category`, `evidence_ids` (non-empty), `confidence`, `rationale` (≤240) | `EnrichmentRecommendation`; `validate_recommendation` |
 | `UnresolvedTransaction` | `transaction_id`, `reason` (free text; validator tokens `below_threshold`, `no_evidence`, `unknown_transaction`, `evidence_mismatch`, `source_unavailable`, `ambiguous`) | `EnrichmentRecommendation` |
 | `EnrichmentRecommendation` | `proposed_overrides`, `merchant_rule_suggestions` (`CreateMappingOp` list), `unresolved`, `narrative` (≤600), `new_categories` (filled by validator) | `submit_recommendation`; `enrichment_proposals.recommendation` |
-| `StewardState` | extends `langchain.agents.AgentState`; extras: `proposed_ops: list[dict]`, `account_scope: int \| None`, `pending_preview: dict \| None`, `apply_result: dict \| None`, `rationale: str \| None` (all `NotRequired`) | `build_steward_builder` `state_schema`; human_approval/execute |
+| `StewardState` | extends `langchain.agents.AgentState`; extras: `proposed_ops: list[dict]`, `account_scope: int \| None`, `pending_preview: dict \| None`, `apply_result: dict \| None`, `rationale: str \| None`, `proposal_id: int` (all `NotRequired`) | `build_steward_builder` `state_schema`; `load_proposal` / execute `mark_consumed` |
 | `EnricherState` | extends `AgentState`; extras: `recommendation: dict`, `proposal_id: int` (both `NotRequired`; no custom reducers) | `build_enricher_builder` `state_schema`; `submit_recommendation` |
 
 `AgentState` (library): `messages: list[AnyMessage]` with `add_messages` reducer; `jump_to` ephemeral/private; `structured_response`. Steward/enricher extras have **no custom reducer** (last write wins). Evidence ids are validated at submit time against the DB, not accumulated in state.
@@ -790,7 +790,7 @@ Observation-cache for enricher recommendations. Never writes `Transaction` or ma
 
 **`proposal_to_ops(proposal) -> list[dict]`** — pure. `proposed_overrides` become `set_transaction_category` dicts, then `merchant_rule_suggestions` as `create` dicts.
 
-**`mark_consumed(db, proposal_id, plan_ref)`** — sets `consumed` + `consumed_plan_ref`; idempotent; caller commits. Wired from the steward execute node in Part B.
+**`mark_consumed(db, proposal_id, plan_ref)`** — sets `consumed` + `consumed_plan_ref`; idempotent; caller commits. Called from `execute` in the same `tool_session` as `apply_mapping_plan`, immediately after that function's commit.
 
 **Tracing:** `validate_recommendation` and `store_proposal` use the enrichment strippers.
 
@@ -807,6 +807,7 @@ flowchart TB
   CLI --> CP
   CP -->|"default"| COORD["coordinator.py::build_coordinator\ncreate_agent + checkpointer required"]
   CP -->|"--steward"| STEW_CP["steward_graph.py::build_steward_graph\ncompile(checkpointer=...)"]
+  CLI -->|"--enricher TASK"| ENR_CLI["enricher_graph.py::build_enricher_graph\nno checkpointer"]
 
   COORD --> LO["list_owners"]
   COORD --> LA["list_accounts"]
@@ -814,16 +815,22 @@ flowchart TB
   COORD --> SUM["summarize"]
   COORD --> AA["subagents.py::ask_analyst"]
   COORD --> RDS["subagents.py::run_data_steward"]
+  COORD --> RE["subagents.py::run_enricher"]
 
   AA -->|"invoke messages=[task] only"| ANALYST["analyst.py::build_analyst\nno checkpointer"]
   RDS -->|"invoke messages=[task] only"| STEW["build_steward_graph(checkpointer=None)\ninherits interrupt to parent"]
+  RE -->|"invoke messages=[task] recursion_limit=15"| ENR["build_enricher_graph\nno checkpointer"]
 
   ANALYST --> AT["ANALYST_TOOLS\nlist_* / search / analytics"]
+  ENR --> ET["ENRICHER_AGENT_TOOLS\nfind_receipts / get_evidence / submit_recommendation"]
+  ET --> PROP["enrichment_proposals"]
   STEW --> SN["node steward\ncreate_agent STEWARD_AGENT_TOOLS"]
+  SN --> LP["load_proposal"]
+  LP --> PROP
   SN -->|"proposed_ops nonempty"| HA["node human_approval\nrecompute preview, interrupt()"]
   SN -->|"else"| END([END])
   HA -->|"decision != approve"| SN
-  HA -->|"approve"| EX["node execute\napply_mapping_plan"]
+  HA -->|"approve"| EX["node execute\napply_mapping_plan + mark_consumed"]
   EX --> SN
 ```
 
@@ -879,6 +886,7 @@ Lists: `READ_TOOLS` (first six), `ANALYTICS_TOOLS` (last four), `ANALYST_TOOLS` 
 |---|---|---|---|---|
 | `preview_mapping_rules` | `ops: list[dict]`, `account_id=None` | `app/services/mapping_preview_service.py::preview_mappings` | read | `app/agent/tools/steward.py::preview_mapping_rules` |
 | `submit_plan` | `ops`, `rationale: str`, `runtime: ToolRuntime`, `account_id=None`; `return_direct=True` | `preview_mappings` then `Command(update=...)` | gate (graph state; **no apply**) | `app/agent/tools/steward.py::submit_plan` |
+| `load_proposal` | `proposal_id: int`, `runtime: ToolRuntime` | `proposal_service.load_proposal` + `proposal_to_ops`; `Command` stores `proposal_id` on `StewardState` | read + graph state | `app/agent/tools/steward.py::load_proposal` |
 
 **`app/agent/tools/subagents.py::make_subagent_tools`**
 
@@ -886,12 +894,13 @@ Lists: `READ_TOOLS` (first six), `ANALYTICS_TOOLS` (last four), `ANALYST_TOOLS` 
 |---|---|---|---|---|
 | `ask_analyst` | `task: str` | `analyst.invoke({"messages":[{"role":"user","content": task}]})` → last text | read delegate | nested in `make_subagent_tools` |
 | `run_data_steward` | `task: str` | `steward.invoke({...})` → `_steward_summary` | write-path delegate (apply only after interrupt resume) | nested in `make_subagent_tools` |
+| `run_enricher` | `task: str` | `enricher.invoke({...}, {recursion_limit: 15})` → `_enricher_summary` (submit text or last AI) | read + observation-cache delegate; returns proposal id text only | nested in `make_subagent_tools` |
 
 Wrappers: **no DB/session before invoke**. History control: parent sees only returned string. Proven: `tests/agent/test_coordinator.py::test_coordinator_history_excludes_analyst_internals`, `tests/agent/test_analyst.py::test_analyst_two_summarize_calls_wrapper_returns_final_only`.
 
-Coordinator tools: `list_owners`, `list_accounts`, `get_total`, `summarize`, `ask_analyst`, `run_data_steward`.
+Coordinator tools: `list_owners`, `list_accounts`, `get_total`, `summarize`, `ask_analyst`, `run_data_steward`, `run_enricher`.
 
-**Counts:** 19 tools; 16 read; 3 non-read (`submit_plan` gate, `run_data_steward` delegate, `submit_recommendation` observation-cache). **0 apply tools.** The enricher is not yet a coordinator tool (Part B).
+**Counts:** 21 tools; 17 read; 4 non-read (`submit_plan` gate, `run_data_steward` delegate, `submit_recommendation` observation-cache, `run_enricher` delegate). **0 apply tools.** The coordinator never relays op lists; it passes a proposal id in the steward task string.
 
 Every tool that hits the DB uses `app/agent/config.py::tool_session` (open/close per call).
 
@@ -1026,6 +1035,16 @@ Always preview first. The submitted ops are paused for approval; applying
 happens only after a human resumes the graph.
 ```
 
+`load_proposal`:
+
+```
+Load a stored enrichment proposal by id.
+
+Returns the proposal narrative, new_categories, an unresolved summary, and the mapping ops derived from the proposal. Pass those ops unchanged to preview_mapping_rules and submit_plan.
+
+Does not apply anything. A missing id returns an error string.
+```
+
 `ask_analyst`:
 
 ```
@@ -1036,6 +1055,12 @@ Delegate spending analysis: comparisons across months/owners/accounts/merchants/
 
 ```
 Delegate normalization cleanup for types, categories, owners, and merchants — including account- or merchant-scoped rules when the user asks. Reviews unmapped values, proposes and previews mapping changes, and pauses for human approval before anything is applied.
+```
+
+`run_enricher`:
+
+```
+Delegate receipt research: what a purchase was, or enrich/research transactions from email. Include transaction ids or a merchant and YYYY-MM-DD date range in the task. Returns a proposal id; do not treat the result as applied changes.
 ```
 
 `email_source_status`:
@@ -1107,6 +1132,8 @@ When delegating mapping work, include any account, kind (type, category, owner, 
 
 Never fabricate numbers. If the steward pauses for approval, tell the user what is pending.
 When relaying steward outcomes, repeat the steward's created_ids, updated_ids, deleted_ids, and reclass_updated exactly; never paraphrase counts into vague success claims.
+
+Questions about what a purchase was, or requests to enrich or research transactions from email, go to run_enricher with a task string naming the transactions or a merchant and date range. The enricher returns a proposal id. To apply it, call run_data_steward with a task that names that proposal id. Never pass op lists to the steward yourself. Pure analytics stays with ask_analyst. If the enricher reports the email source is unavailable, tell the user how to enable it (the EMAIL_PROVIDER variable) and do not retry.
 ```
 
 **Analyst** — `app/agent/analyst.py::ANALYST_PROMPT`
@@ -1158,6 +1185,8 @@ If preview reports conflicts_with_existing_id, submit an update on that mapping_
 For transaction-specific corrections, use `set_transaction_category` only when a rule would be wrong because the change applies to one specific transaction, not the broader raw value. Cite `evidence_ids` when they exist. If preview shows `replace_conflict`, do not submit that plan — either drop the op or submit `remove_transaction_override` for that transaction earlier in the same plan and re-preview.
 
 After execute, report created_ids, updated_ids, deleted_ids, and reclass_updated verbatim. If reclass_updated is 0 when changes were expected, say so explicitly; do not claim rows were updated.
+
+When the task references a proposal id, call load_proposal first, preview the ops as given, drop or precede with remove_transaction_override any op the preview marks replace_conflict, do not add ops that are not in the proposal unless the task says so, and mention new_categories in the rationale so the approver sees them.
 ```
 
 **Middleware fragments** — `app/agent/middleware.py`
@@ -1258,6 +1287,8 @@ CLI (`app/agent/cli.py::_decision`): `reject*` → `{"decision":"reject","ops":[
 | 30 | `submit_recommendation` validates evidence ids against the DB and applies the confidence threshold; the model cannot bypass either. | Threshold and citations are server-side | `proposal_service.py::validate_recommendation` | `tests/services/test_proposal_service.py` |
 | 31 | The enricher graph ends after exactly one `submit_recommendation`. | No extra model turn after the proposal is stored | `enricher_graph.py` routing + `return_direct=True` | `tests/agent/test_enricher.py::test_scripted_enricher_happy_path` |
 | 32 | `get_evidence` never returns line-item descriptions. | Email/PII must not re-enter the agent context | `tools/enricher.py::get_evidence` | `tests/agent/test_enricher.py::test_get_evidence_omits_line_item_descriptions` |
+| 33 | A proposal reaches the steward only by id; the coordinator never relays ops. | Handoff is text (`proposal #N`) | coordinator prompt + `run_enricher` returns text only | `tests/agent/test_coordinator_enrichment_flow.py` step 2 |
+| 34 | The enricher is compiled without a checkpointer; the coordinator remains the only graph with one. | Interrupt/thread stay on the outer graph | `coordinator.py`, `enricher_graph.py` | `test_coordinator_has_one_checkpointer_enricher_has_none` |
 | 14 | Type/owner recompute gated on `raw_type` / `owner_raw` | Sign-derived and default-owner rows stay | `run_reclassification`; preview `_rule_in_scope` | `test_preview_gates` |
 | 15 | `spend_only` totals use `abs(amount)` and SPEND only | Mixed-sign CSVs | `_amount_expr`, `_apply_filters` | `test_spend_only_excludes_payments_and_refunds`, `test_mixed_sign_spends_use_abs` |
 | 16 | Effective category/merchant coalesce override > normalized > raw | Analytics + list filters | SQL case + `resolved_merchant` | `test_summarize_category_coalesce_override_wins`, `test_merchant_filter_and_group_by_use_effective_value` |
@@ -1283,7 +1314,8 @@ Never read `.env` values into this document. Names from `.env.example` and code:
 | Name | Purpose | Default | Consumed |
 |---|---|---|---|
 | `DATABASE_URL` | SQLAlchemy URL for app DB; if `postgresql*`, also Postgres checkpointer | **required** (`Settings.database_url`, no default) | `app/config.py::Settings`; tests `setdefault("sqlite:///:memory:")` then use a separate StaticPool engine |
-| `STEWARD_MODEL` | Model id for coordinator, analyst, steward | `anthropic:claude-sonnet-4-6` (`DEFAULT_MODEL`) | `app/agent/config.py::model_name` |
+| `STEWARD_MODEL` | Model id for coordinator, analyst, steward; enricher fallback | `anthropic:claude-sonnet-4-6` (`DEFAULT_MODEL`) | `app/agent/config.py::model_name` |
+| `ENRICHER_MODEL` | Optional enricher model id; empty falls back to `STEWARD_MODEL` via `model_name()` | unset → `STEWARD_MODEL` | `app/agent/config.py::enricher_model_name`; `build_coordinator` / `build_enricher_builder` |
 | `AGENT_CHECKPOINT_PATH` | SQLite checkpoint file when DB is not Postgres | `.agent_checkpoints.sqlite` | `checkpoint_sqlite_path` |
 | `EMAIL_PROVIDER` | Email source selector: `none` / `fake` / `gmail` | `none` | `app/agent/config.py::email_source_from_env` |
 | `EMAIL_SENDER_ALLOWLIST` | Comma-separated sender scope for all email sources; empty means none, `*` means unrestricted | empty string | `parse_allowlist` + `AllowlistedEmailSource` |
@@ -1320,7 +1352,7 @@ Optional `LANGSMITH_*` vars documented in `.env.example`; `Settings` uses `extra
 
 **`pytest.ini`:** `pythonpath = .`, `testpaths = tests`, `addopts = -m "not live_gmail"`, marker `live_gmail`.
 
-**`langgraph.json`:** repo root; three graphs via `app/agent/studio.py` factories; `"dependencies": ["."]`; `"env": ".env"`. Studio Python guard: ≥3.11, &lt;3.14.
+**`langgraph.json`:** repo root; four graphs via `app/agent/studio.py` factories; `"dependencies": ["."]`; `"env": ".env"`. Studio Python guard: ≥3.11, &lt;3.14.
 
 ---
 
@@ -1344,7 +1376,7 @@ Optional `LANGSMITH_*` vars documented in `.env.example`; `Settings` uses `extra
 
 **First trace to read:** steward approval — `preview_mappings` span → interrupt gap → `apply_mapping_plan` + `run_reclassification` with `reclass_updated`.
 
-**Studio:** `make studio` → `langgraph dev` on `:2024`. Graphs: `coordinator`, `steward`, `analyst`. Dev server uses in-memory persistence; CLI checkpointer unaffected. Chrome: allow local network access for `smith.langchain.com`.
+**Studio:** `make studio` → `langgraph dev` on `:2024`. Graphs: `coordinator`, `steward`, `analyst`, `enricher`. Dev server uses in-memory persistence; CLI checkpointer unaffected. Chrome: allow local network access for `smith.langchain.com`.
 
 **Privacy:** enrichment traces redact `EmailMessage.body_text`, `EmailRef.snippet`, email headers, `EmailQuery.text_hints`, quoted phrases in the built Gmail query, and `ReceiptExtraction.line_items[].description`. Transport RPC calls are not traced individually. `TransactionEvidence.extraction` stores only the structured receipt payload and never a `body_text` field. `LANGSMITH_HIDE_INPUTS` / `LANGSMITH_HIDE_OUTPUTS` still hide whole payloads when enabled.
 
@@ -1352,7 +1384,7 @@ Optional `LANGSMITH_*` vars documented in `.env.example`; `Settings` uses `extra
 
 ## 12. Testing strategy
 
-Run: `.venv/bin/python -m pytest` (212 passed, 1 deselected `live_gmail`). `scripts/verify_api.py` is a separate HTTP walkthrough, not pytest.
+Run: `.venv/bin/python -m pytest` (217 passed, 1 deselected `live_gmail`). `scripts/verify_api.py` is a separate HTTP walkthrough, not pytest.
 
 | Suite | Covers | Fixtures / fakes |
 |---|---|---|
@@ -1362,7 +1394,8 @@ Run: `.venv/bin/python -m pytest` (212 passed, 1 deselected `live_gmail`). `scri
 | `tests/enrichment/gmail_mcp/` | query builder, mapping, adapter, transport error mapping, env factory; synthetic Gmail MCP fixtures only | `FakeMcpTransport`; fixtures under `tests/enrichment/gmail_mcp/fixtures/` |
 | `tests/routers/` | HTTP contracts, import+dedupe+patch, reclassify gates, analytics aliases/filters, mapping CRUD/preview/apply | TestClient + shared SQLite |
 | `tests/services/` | preview purity/gates/shadow/conflict; apply txn/idempotency/conflicts | direct service calls |
-| `tests/agent/` | scripted graphs, interrupt/resume, CLI parse/config, middleware, coordinator routing, Studio entrypoints, enricher happy/unavailable/write-snapshot | `ScriptedChatModel`, `agent_sessions`, `seed_coffee`, `capture_apply`, `FakeEmailSource`, `FakeExtractor` |
+| `tests/agent/` | scripted graphs, interrupt/resume, CLI parse/config, middleware, coordinator routing, Studio entrypoints, enricher happy/unavailable/write-snapshot, coordinator enrichment e2e | `ScriptedChatModel`, `agent_sessions`, `seed_coffee`, `capture_apply`, `FakeEmailSource`, `FakeExtractor` |
+| `tests/agent/test_coordinator_enrichment_flow.py` | scripted coordinator+enricher+steward: proposal #1, interrupt ops, approve/reject, `EMAIL_PROVIDER=none`, checkpointer pin | fakes + wrap-through apply |
 | `tests/services/test_proposal_service.py` | recommendation validation, `proposal_to_ops` shapes | shared SQLite |
 
 **`tests/conftest.py`:** `os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")` **before** app import; tracing env vars set to `false` (LANGSMITH_* and LANGCHAIN_* aliases) before import + autouse fixture. Actual tables on `sqlite://` + `StaticPool` + FK pragma. `get_session` overridden to `db_session`. Drop_all after each test.
@@ -1384,9 +1417,8 @@ Run: `.venv/bin/python -m pytest` (212 passed, 1 deselected `live_gmail`). `scri
 | Receipt extractors | `app/domain/receipts.py::ReceiptExtractor` is the port. `RegexReceiptExtractor` is the deterministic fallback; `ModelReceiptExtractor` lives in `receipt_extractors.py` so domain modules stay free of langchain. |
 | Per-import mapping override | `resolve_mapping(..., override=)` currently ignores override. HTTP import has no override field. |
 | Alternate lookups | `NormalizationLookup` + fake in tests; preview uses `MergedNormalizationLookup`. |
-| Research agent | **This slice (enricher graph + proposals).** Coordinator `run_enricher` routing, steward `load_proposal`, Studio entry, and the scripted e2e flow are Part B. |
 | Import dry-run agent | `normalize_rows` already returns errors+unmapped without persist; ingest always commits. A dry-run would stop before `ImportBatch` / insert. |
-| Chat UI on thread/interrupt | CLI already: `interrupt` payload `{ops, preview, rationale}`, resume `{decision, ops}`, `thread_id` + durable saver. Same `Command(resume=...)`. |
+| Chat UI on the thread/interrupt contract | CLI already: `interrupt` payload `{ops, preview, rationale}`, resume `{decision, ops}`, `thread_id` + durable saver. Same `Command(resume=...)`. |
 | Batch HTTP beyond plans | `POST /mappings/apply` **is** the batch endpoint (`ops` list). No batch import of multiple files. No batch PATCH transactions. |
 | Alembic | `init_db` + two ALTER helpers only. |
 

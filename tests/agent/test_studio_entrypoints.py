@@ -15,7 +15,7 @@ def _load_langgraph_config() -> dict:
 def test_langgraph_json_references_studio_factories() -> None:
     config = _load_langgraph_config()
     assert config["dependencies"] == ["."]
-    assert set(config["graphs"]) == {"coordinator", "steward", "analyst"}
+    assert set(config["graphs"]) == {"coordinator", "steward", "analyst", "enricher"}
     for graph_id, ref in config["graphs"].items():
         module_path, factory_name = ref.split(":")
         assert module_path.endswith("app/agent/studio.py")

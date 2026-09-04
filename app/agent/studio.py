@@ -10,6 +10,7 @@ from langchain_core.runnables import RunnableConfig
 
 from app.agent.analyst import build_analyst
 from app.agent.coordinator import build_coordinator
+from app.agent.enricher_graph import build_enricher_graph
 from app.agent.steward_graph import build_steward_graph
 
 
@@ -29,3 +30,9 @@ def analyst_graph(config: RunnableConfig | None = None):
     """Analyst alone for Studio."""
     del config
     return build_analyst()
+
+
+def enricher_graph(config: RunnableConfig | None = None):
+    """Enricher alone for Studio. No compile-time checkpointer."""
+    del config
+    return build_enricher_graph()

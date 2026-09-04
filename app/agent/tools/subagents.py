@@ -44,7 +44,20 @@ def _steward_summary(result: dict) -> str:
     return _last_text(result) or "nothing unmapped"
 
 
-def make_subagent_tools(*, analyst, steward):
+def _enricher_summary(result: dict) -> str:
+    for message in reversed(result.get("messages") or []):
+        if getattr(message, "type", None) != "tool":
+            continue
+        content = getattr(message, "content", "") or ""
+        if isinstance(content, str) and content.startswith("proposal #"):
+            return content
+        name = getattr(message, "name", None)
+        if name == "submit_recommendation" and isinstance(content, str):
+            return content
+    return _last_text(result)
+
+
+def make_subagent_tools(*, analyst, steward, enricher):
     """Wrap compiled subagents. Invoke with a fresh user message; return the final text only."""
 
     @tool(
@@ -73,4 +86,20 @@ def make_subagent_tools(*, analyst, steward):
         result = steward.invoke({"messages": [{"role": "user", "content": task}]})
         return _steward_summary(result)
 
-    return [ask_analyst, run_data_steward]
+    @tool(
+        "run_enricher",
+        description=(
+            "Delegate receipt research: what a purchase was, or enrich/research "
+            "transactions from email. Include transaction ids or a merchant and "
+            "YYYY-MM-DD date range in the task. Returns a proposal id; do not "
+            "treat the result as applied changes."
+        ),
+    )
+    def run_enricher(task: str) -> str:
+        result = enricher.invoke(
+            {"messages": [{"role": "user", "content": task}]},
+            {"recursion_limit": 15},
+        )
+        return _enricher_summary(result)
+
+    return [ask_analyst, run_data_steward, run_enricher]

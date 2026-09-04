@@ -19,7 +19,9 @@ from app.agent.config import (
     open_checkpointer,
 )
 from app.agent.coordinator import build_coordinator
+from app.agent.enricher_graph import build_enricher_graph
 from app.agent.steward_graph import build_steward_graph
+from app.agent.tools.subagents import _enricher_summary
 from app.services.enrichment_service import (
     EnrichmentConfig,
     enrich_range,
@@ -191,6 +193,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Run the steward graph alone (no coordinator)",
     )
     parser.add_argument(
+        "--enricher",
+        metavar="TASK",
+        help="Run the enricher graph alone (no coordinator) for this task",
+    )
+    parser.add_argument(
         "--enrich",
         action="store_true",
         help="Run email enrichment over a transaction date range",
@@ -279,8 +286,20 @@ def _run_enrich(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_enricher(task: str) -> int:
+    graph = build_enricher_graph()
+    result = graph.invoke(
+        {"messages": [{"role": "user", "content": task}]},
+        {"recursion_limit": 15},
+    )
+    print(_enricher_summary(result))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
+    if args.enricher:
+        raise SystemExit(_run_enricher(args.enricher))
     if args.enrich:
         raise SystemExit(_run_enrich(args))
     thread_id = args.thread_id or str(uuid.uuid4())

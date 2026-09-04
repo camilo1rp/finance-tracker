@@ -4,7 +4,8 @@ from __future__ import annotations
 from langchain.agents import create_agent
 
 from app.agent.analyst import build_analyst
-from app.agent.config import model_name
+from app.agent.config import EnricherDeps, enricher_model_name, model_name
+from app.agent.enricher_graph import build_enricher_graph
 from app.agent.middleware import CurrentDateMiddleware
 from app.agent.steward_graph import build_steward_graph
 from app.agent.tools.read import get_total, list_accounts, list_owners, summarize
@@ -22,6 +23,8 @@ When delegating mapping work, include any account, kind (type, category, owner, 
 
 Never fabricate numbers. If the steward pauses for approval, tell the user what is pending.
 When relaying steward outcomes, repeat the steward's created_ids, updated_ids, deleted_ids, and reclass_updated exactly; never paraphrase counts into vague success claims.
+
+Questions about what a purchase was, or requests to enrich or research transactions from email, go to run_enricher with a task string naming the transactions or a merchant and date range. The enricher returns a proposal id. To apply it, call run_data_steward with a task that names that proposal id. Never pass op lists to the steward yourself. Pure analytics stays with ask_analyst. If the enricher reports the email source is unavailable, tell the user how to enable it (the EMAIL_PROVIDER variable) and do not retry.
 """
 
 
@@ -30,6 +33,8 @@ def build_coordinator(
     model=None,
     analyst_model=None,
     steward_model=None,
+    enricher_model=None,
+    enricher_deps: EnricherDeps | None = None,
     checkpointer=None,
 ):
     """Compile the coordinator. This is the only graph that gets a checkpointer.
@@ -44,12 +49,19 @@ def build_coordinator(
         model=steward_model if steward_model is not None else resolved,
         checkpointer=None,
     )
+    if enricher_model is not None:
+        enricher_resolved = enricher_model
+    elif model is not None:
+        enricher_resolved = resolved
+    else:
+        enricher_resolved = enricher_model_name()
+    enricher = build_enricher_graph(model=enricher_resolved, deps=enricher_deps)
     tools = [
         list_owners,
         list_accounts,
         get_total,
         summarize,
-        *make_subagent_tools(analyst=analyst, steward=steward),
+        *make_subagent_tools(analyst=analyst, steward=steward, enricher=enricher),
     ]
     agent_kwargs: dict = {
         "system_prompt": COORDINATOR_PROMPT,

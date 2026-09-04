@@ -1,6 +1,8 @@
 """Preview and plan-submission tools. There is no tool that applies mappings."""
 from __future__ import annotations
 
+import json
+
 from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
@@ -8,6 +10,8 @@ from langgraph.types import Command
 from app.agent.config import tool_session
 from app.schemas import MappingOp, MappingPlanIn, parse_mapping_op
 from app.services.mapping_preview_service import preview_mappings
+from app.services.proposal_service import load_proposal as fetch_proposal
+from app.services.proposal_service import proposal_to_ops
 
 _PREVIEW_DESCRIPTION = """\
 Preview a mapping plan against stored transactions. Performs no writes.
@@ -91,4 +95,41 @@ def submit_plan(
     )
 
 
-STEWARD_TOOLS = [preview_mapping_rules, submit_plan]
+_LOAD_PROPOSAL_DESCRIPTION = """\
+Load a stored enrichment proposal by id.
+
+Returns the proposal narrative, new_categories, an unresolved summary, and the mapping ops derived from the proposal. Pass those ops unchanged to preview_mapping_rules and submit_plan.
+
+Does not apply anything. A missing id returns an error string.
+"""
+
+
+@tool(description=_LOAD_PROPOSAL_DESCRIPTION)
+def load_proposal(proposal_id: int, runtime: ToolRuntime) -> Command | str:
+    with tool_session() as db:
+        proposal = fetch_proposal(db, proposal_id)
+        if proposal is None:
+            return f"No enrichment proposal with id {proposal_id}."
+        rec = proposal.recommendation if isinstance(proposal.recommendation, dict) else {}
+        ops = proposal_to_ops(proposal)
+        payload = {
+            "proposal_id": proposal.id,
+            "narrative": rec.get("narrative"),
+            "new_categories": rec.get("new_categories") or [],
+            "unresolved": rec.get("unresolved") or [],
+            "ops": ops,
+        }
+    return Command(
+        update={
+            "proposal_id": proposal.id,
+            "messages": [
+                ToolMessage(
+                    content=json.dumps(payload),
+                    tool_call_id=runtime.tool_call_id or "",
+                )
+            ],
+        }
+    )
+
+
+STEWARD_TOOLS = [preview_mapping_rules, submit_plan, load_proposal]

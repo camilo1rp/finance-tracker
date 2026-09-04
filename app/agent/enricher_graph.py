@@ -6,7 +6,7 @@ from typing import Literal
 from langchain.agents import create_agent
 from langgraph.graph import END, START, StateGraph
 
-from app.agent.config import EnricherDeps, model_name, set_enricher_deps
+from app.agent.config import EnricherDeps, enricher_model_name, set_enricher_deps
 from app.agent.schemas import EnricherState
 from app.agent.tools import ENRICHER_AGENT_TOOLS
 
@@ -41,7 +41,7 @@ def build_enricher_builder(*, model=None, deps: EnricherDeps | None = None) -> S
     if deps is not None:
         set_enricher_deps(deps)
     enricher = create_agent(
-        model if model is not None else model_name(),
+        model if model is not None else enricher_model_name(),
         ENRICHER_AGENT_TOOLS,
         system_prompt=ENRICHER_SYSTEM_PROMPT,
         state_schema=EnricherState,

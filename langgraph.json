@@ -3,7 +3,8 @@
   "graphs": {
     "coordinator": "./app/agent/studio.py:coordinator_graph",
     "steward": "./app/agent/studio.py:steward_graph",
-    "analyst": "./app/agent/studio.py:analyst_graph"
+    "analyst": "./app/agent/studio.py:analyst_graph",
+    "enricher": "./app/agent/studio.py:enricher_graph"
   },
   "env": ".env"
 }
