@@ -76,6 +76,7 @@ What this document deliberately does **not** cover is listed in **§15**. A sect
 | § | Decide here |
 |---|---|
 | 0 | Freshness, counts, stack constraints |
+| 0.2 | Worked examples: question → section |
 | 1 | What the product is |
 | 1.1 | Vocabulary |
 | 2 | Where code lives |
@@ -102,6 +103,23 @@ What this document deliberately does **not** cover is listed in **§15**. A sect
 | 16 | Index into the reasoning docs |
 
 **Not covered here:** how to operate Gmail OAuth in a browser (see `docs/email-enrichment/GMAIL-SETUP.md`).
+
+---
+
+## 0.2 Worked examples
+
+How a planner navigates this document: resolve a real question to a section.
+
+| Question | Answer in one or two lines | Sections |
+|---|---|---|
+| Where would a metadata-triage step between search and fetch be inserted, what would it receive, and what must it respect? | After `source.search`, before `fetch`. Input is `list[EmailRef]` (no bodies). Must keep INV-37 (allowlist), INV-38/39 (no extra Gmail ops), INV-45 (`RECEIPT_SHAPE_CLAUSE` already in `q`). | §8B.3 |
+| What changes are needed to support a second mailbox, and what would break? | One `email_source_from_env` per process; process-global allowlist; shared `gmail:<id>` `external_ref` space. | §15, §7A, §13A |
+| Which agent can search the mailbox, and with what constraints? | Enricher only, via `find_receipts(transaction_ids)` (1–25). The model cannot supply a Gmail `q`. | §8C |
+| If `effective_category` needed to consult another table, which code paths change? | `analytics_service`, `GET /transactions` filters, `list_transactions` / `list_unmatched`. No test asserts the SQL text. | §13A first row, §3.6 |
+| What happens between a user typing "approve" and a row being updated, and where can it fail? | CLI `_decision` → resume → `human_approval` → `execute` → `apply_mapping_plan` (commit) → `mark_consumed` (second commit). Conflict = nothing written; reclassify exception = rollback; crash between commits = plan applied, proposal `open`. | §8B.2, §8.5, §11A |
+| Which claims are not backed by a test? | Anything marked [C] or [D]; §9 is the [T] set. Examples: `discarded` never written [C]; Studio Python pin [D]; 7-day Testing-status refresh tokens [D]. | [C]/[D] markers; §9 |
+
+When a new question cannot be resolved to a section this way, that is a gap in the document, not in the reader — add the section or a 'Not covered here' line.
 
 ---
 
@@ -2069,7 +2087,7 @@ Moved from §12 "deliberately not covered" and extended. For each: what would be
 |---|---|---|
 | Splits (multi-category orders) | Line items retained on extraction; one `category_override` per txn | New op or split entity; matcher already has `split_partial` for **amount** across sibling **transactions**, not line-item category splits |
 | Attachment / PDF receipts | `AttachmentRef` listed; bytes never fetched | New fetch path; do not widen `ALLOWED_ENDPOINTS` with attachment GET without an allowlist |
-| Multi-mailbox | One `EmailSource` per process from env | Per-account source factory; identity of `external_ref` already shared `gmail:` space |
+| Multi-mailbox | One `EmailSource` per process from env | Per-account source factory; identity of `external_ref` already shared `gmail:` space. The sender allowlist is process-global (`EMAIL_SENDER_ALLOWLIST` → one `AllowlistedEmailSource` per `app/agent/config.py::email_source_from_env`); a second account almost certainly needs its own scope, so per-source allowlist configuration is a prerequisite, not a follow-up. [C] |
 | Non-Gmail providers | `EmailSource` port | New adapter package; do not reuse `ALLOWED_TOOLS` / `ALLOWED_ENDPOINTS` |
 | Alembic | `init_db` + two ALTER helpers | Migration tool + version table |
 | Concurrency | Single-writer assumption | Locks on apply/enrich; checkpointer already thread-id scoped |
