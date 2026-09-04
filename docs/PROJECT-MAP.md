@@ -12,7 +12,7 @@ Planning reference for `finance-tracker-skeleton`. Derived from source and tests
 | Working tree | Email enrichment + enricher subagent + coordinator routing |
 | Python (venv) | 3.14.5 (Studio requires ≥3.11 and &lt;3.14; use Dockerfile 3.12 or a 3.11–3.13 venv) |
 | Dockerfile base | `python:3.12-slim` |
-| Tests | **217 passed**, 1 deselected (`live_gmail`) (`pytest -q`) |
+| Tests | **218 passed**, 1 deselected (`live_gmail`) (`pytest -q`) |
 
 ### Reconciled counts
 
@@ -22,7 +22,7 @@ Planning reference for `finance-tracker-skeleton`. Derived from source and tests
 | Tables | **9** (`owners`, `accounts`, `normalization_mappings`, `import_batches`, `transactions`, `transaction_evidence`, `merchant_senders`, `transaction_overrides`, `enrichment_proposals`) |
 | Agent tools | **21** (17 read / 3 gate-or-delegate / 1 observation-cache submit; **0** DB-apply tools) |
 | Graphs in `langgraph.json` | **4** (`coordinator`, `steward`, `analyst`, `enricher`) |
-| Tests passing | **217** (+ 1 deselected `live_gmail`) |
+| Tests passing | **218** (+ 1 deselected `live_gmail`) |
 
 ### Versions
 
@@ -1235,7 +1235,7 @@ CLI (`app/agent/cli.py::_decision`): `reject*` → `{"decision":"reject","ops":[
 
 **After resume approve:** `execute` calls `apply_mapping_plan` (commits inside), writes `apply_result` dump, clears plan fields, HumanMessage with verbatim ids/counts, goto `steward` for a spoken wrap-up.
 
-`run_data_steward` return: if `apply_result` present, `"applied created_ids=... reclass_updated=..."`; else if a message contains `"nothing was applied"` → `"rejected"`; else last text or `"nothing unmapped"`.
+`run_data_steward` return: if `apply_result` present, `"applied created_ids=... overrides_set=... overrides_removed=... reclass_updated=..."`; else if a message contains `"nothing was applied"` → `"rejected"`; else last text or `"nothing unmapped"`.
 
 ### 8.6 Checkpointer
 
@@ -1384,7 +1384,7 @@ Optional `LANGSMITH_*` vars documented in `.env.example`; `Settings` uses `extra
 
 ## 12. Testing strategy
 
-Run: `.venv/bin/python -m pytest` (217 passed, 1 deselected `live_gmail`). `scripts/verify_api.py` is a separate HTTP walkthrough, not pytest.
+Run: `.venv/bin/python -m pytest` (218 passed, 1 deselected `live_gmail`). `scripts/verify_api.py` is a separate HTTP walkthrough, not pytest.
 
 | Suite | Covers | Fixtures / fakes |
 |---|---|---|
@@ -1448,6 +1448,7 @@ Verified against code:
 18. **Gmail `date` is day-precision.** The adapter sets `EmailRef.received_at` to midnight UTC and `received_at_precision="date"`. RFC `Message-ID` is not exposed, so `TransactionEvidence.external_ref` is `{provider}:{message id}` (`gmail:<id>`). Gmail `from:` is fuzzy, so the allowlist is re-applied after search.
 19. **The enricher ends via a submit tool, not structured output.** `submit_recommendation` mirrors `submit_plan`: `return_direct=True` + `Command` into `EnricherState`, then the outer graph goes to END. There is no finalize node.
 20. **The confidence threshold is enforced server-side** in `validate_recommendation`, not by the model. Below-threshold overrides are moved to `unresolved` with reason `below_threshold`.
+21. **`mark_consumed` commits separately after the apply commit.** `execute` calls `apply_mapping_plan` (which commits) then `mark_consumed` + `db.commit()` on the same session. A crash between them leaves an applied plan with an `open` proposal — harmless because re-apply is idempotent; do not merge them into one transaction.
 
 ### Doc vs code discrepancy list (ground rule 1)
 

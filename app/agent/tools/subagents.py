@@ -33,6 +33,8 @@ def _steward_summary(result: dict) -> str:
             f"created_ids={apply_result.get('created_ids')} "
             f"updated_ids={apply_result.get('updated_ids')} "
             f"deleted_ids={apply_result.get('deleted_ids')} "
+            f"overrides_set={apply_result.get('overrides_set')} "
+            f"overrides_removed={apply_result.get('overrides_removed')} "
             f"skipped={skipped} "
             f"reclass_scanned={apply_result.get('reclass_scanned')} "
             f"reclass_updated={apply_result.get('reclass_updated')}"

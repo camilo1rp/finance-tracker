@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.agent.config import EnricherDeps, in_memory_checkpointer, set_enricher_deps
 from app.agent.coordinator import build_coordinator
 from app.agent.enricher_graph import build_enricher_builder, build_enricher_graph
+from app.agent.tools.subagents import _steward_summary
 from app.models import (
     Account,
     EnrichmentProposal,
@@ -289,12 +290,7 @@ def test_coordinator_enrichment_approve_flow(
                     }
                 ],
             ),
-            AIMessage(
-                content=(
-                    "Applied created_ids=[] updated_ids=[] deleted_ids=[] "
-                    "overrides_set=1 reclass_updated=0."
-                )
-            ),
+            AIMessage(content="Applied the approved enrichment plan."),
         ]
     )
     graph = _coordinator(
@@ -347,7 +343,15 @@ def test_coordinator_enrichment_approve_flow(
     consumed = db_session.get(EnrichmentProposal, 1)
     assert consumed.status == ProposalStatus.CONSUMED.value
     assert consumed.consumed_plan_ref
-    assert "overrides_set=1" in (resumed["messages"][-1].content or "")
+    steward_tools = [
+        message
+        for message in resumed.get("messages") or []
+        if getattr(message, "type", None) == "tool"
+        and getattr(message, "name", None) == "run_data_steward"
+    ]
+    assert steward_tools, "expected run_data_steward tool result after approve"
+    assert "overrides_set=1" in (steward_tools[-1].content or "")
+    assert "overrides_set" not in (resumed["messages"][-1].content or "")
     set_enricher_deps(None)
 
 
@@ -517,3 +521,23 @@ def test_studio_enricher_factory_has_no_checkpointer(monkeypatch: pytest.MonkeyP
 
     graph = studio.enricher_graph()
     assert graph.checkpointer is None
+
+
+def test_steward_summary_includes_override_counters() -> None:
+    text = _steward_summary(
+        {
+            "apply_result": {
+                "created_ids": [],
+                "updated_ids": [],
+                "deleted_ids": [],
+                "skipped": [],
+                "overrides_set": 2,
+                "overrides_removed": 1,
+                "reclass_scanned": 3,
+                "reclass_updated": 1,
+            }
+        }
+    )
+    assert "overrides_set=2" in text
+    assert "overrides_removed=1" in text
+    assert text.startswith("applied ")
