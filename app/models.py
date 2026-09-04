@@ -10,11 +10,13 @@ generic lookup table backing type/category/owner classification.
 """
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from enum import Enum
 
 from sqlalchemy import (
     JSON,
     Numeric,
     String,
+    Text,
     Date,
     DateTime,
     ForeignKey,
@@ -181,6 +183,23 @@ class TransactionOverride(Base):
     category: Mapped[str] = mapped_column(String)
     evidence_ids: Mapped[list[int]] = mapped_column(JSON)
     plan_source: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+
+
+class ProposalStatus(str, Enum):
+    OPEN = "open"
+    CONSUMED = "consumed"
+    DISCARDED = "discarded"
+
+
+class EnrichmentProposal(Base):
+    __tablename__ = "enrichment_proposals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task: Mapped[str] = mapped_column(Text)
+    recommendation: Mapped[dict] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String)
+    consumed_plan_ref: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
 
 

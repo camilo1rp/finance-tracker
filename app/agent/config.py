@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any
 
 from dotenv import load_dotenv
@@ -12,6 +13,16 @@ from sqlalchemy.orm import Session, sessionmaker
 load_dotenv()
 
 _session_factory: sessionmaker[Session] | None = None
+
+
+@dataclass(frozen=True)
+class EnricherDeps:
+    source_factory: Callable[[], Any]
+    extractor_factory: Callable[[], Any]
+    config: Any
+
+
+_enricher_deps: EnricherDeps | None = None
 
 DEFAULT_MODEL = "anthropic:claude-sonnet-4-6"
 DEFAULT_CHECKPOINT_PATH = ".agent_checkpoints.sqlite"
@@ -156,6 +167,28 @@ def set_session_factory(factory: sessionmaker[Session] | None) -> None:
     """Tests inject the pytest engine so tools share the same SQLite database."""
     global _session_factory
     _session_factory = factory
+
+
+def set_enricher_deps(deps: EnricherDeps | None) -> None:
+    """Tests inject FakeEmailSource / FakeExtractor; production uses env defaults."""
+    global _enricher_deps
+    _enricher_deps = deps
+
+
+def get_enricher_deps() -> EnricherDeps:
+    if _enricher_deps is not None:
+        return _enricher_deps
+    from app.services.enrichment_service import EnrichmentConfig
+
+    return EnricherDeps(
+        source_factory=email_source_from_env,
+        extractor_factory=extractor_from_env,
+        config=EnrichmentConfig(
+            lookback_days=email_lookback_days(),
+            lookahead_days=email_lookahead_days(),
+            max_candidates=email_max_candidates(),
+        ),
+    )
 
 
 def get_tool_session_factory() -> sessionmaker[Session]:
