@@ -5,7 +5,7 @@ from html.parser import HTMLParser
 import html
 import re
 
-from app.domain.email_source import truncate_text_bytes
+from app.domain.email_source import BodySource, truncate_text_bytes
 
 _BLOCK_TAGS = {
     "p",
@@ -75,6 +75,27 @@ def html_to_text(html_str: str) -> str:
     text = re.sub(r" *\n *", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def select_body(plain: str, html: str) -> tuple[str, BodySource, int, int]:
+    """Pick the substantive body when both MIME parts are present.
+
+    Transactional mail often ships a short plain-text stub next to the real
+    HTML. Plain wins only when len(plain) >= 0.5 * len(html_to_text(html)).
+    Returns (body, source, plain_bytes, html_text_bytes).
+    """
+    html_text = html_to_text(html) if html else ""
+    plain_bytes = len(plain)
+    html_text_bytes = len(html_text)
+    if plain and html:
+        if plain_bytes >= 0.5 * html_text_bytes:
+            return plain, "text/plain", plain_bytes, html_text_bytes
+        return html_text, "text/html (plain stub)", plain_bytes, html_text_bytes
+    if plain:
+        return plain, "text/plain", plain_bytes, html_text_bytes
+    if html:
+        return html_text, "text/html", plain_bytes, html_text_bytes
+    return "", "none", plain_bytes, html_text_bytes
 
 
 def normalize_headers(pairs) -> dict[str, str]:

@@ -1,6 +1,6 @@
 {
-  "id": "msg_test_alt_01",
-  "threadId": "thread_test_alt",
+  "id": "msg_test_stub_01",
+  "threadId": "thread_test_stub",
   "snippet": "Order confirmation",
   "internalDate": "1717329600000",
   "payload": {
@@ -25,7 +25,7 @@
       },
       {
         "name": "Message-ID",
-        "value": "<msg-test-01@example-shop.test>"
+        "value": "<msg-test-stub-01@example-shop.test>"
       },
       {
         "name": "X-Ignored",
@@ -44,8 +44,8 @@
           }
         ],
         "body": {
-          "size": 71,
-          "data": "T3JkZXIgI1RFU1QtMTAwMQpUb3RhbCAkMjUuMDAKVGhhbmsgeW91IGZvciBzaG9wcGluZyB3aXRoIEV4YW1wbGUgU2hvcC4"
+          "size": 14,
+          "data": "VmlldyBpbiBIVE1MLgo"
         }
       },
       {
@@ -59,8 +59,8 @@
           }
         ],
         "body": {
-          "size": 114,
-          "data": "PHA-T3JkZXIgI1RFU1QtMTAwMTwvcD48cD5Ub3RhbCAkMjUuMDA8L3A-PHA-VGhhbmsgeW91IGZvciBzaG9wcGluZyB3aXRoIEV4YW1wbGUgU2hvcC4gRXh0cmEgSFRNTC1vbmx5IGZvb3Rlci48L3A-"
+          "size": 143,
+          "data": "PGh0bWw-PGJvZHk-PGgxPk9yZGVyIGNvbmZpcm1hdGlvbjwvaDE-PHA-T3JkZXIgI1RFU1QtMTAwMTwvcD48cD5Ub3RhbCAkMjUuMDA8L3A-PHA-VGhhbmsgeW91IGZvciBzaG9wcGluZyB3aXRoIEV4YW1wbGUgU2hvcC48L3A-PC9ib2R5PjwvaHRtbD4"
         }
       }
     ]

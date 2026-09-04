@@ -41,7 +41,10 @@ def test_message_to_email_prefers_plaintext_and_html_fallback() -> None:
     )
     message = message_to_email(plain, ref, byte_cap=65536)
     assert "Order #TEST-1001" in message.body_text
-    assert "ignored because plaintext" not in message.body_text
+    assert "Extra HTML-only footer" not in message.body_text
+    assert message.body_source == "text/plain"
+    assert message.plain_bytes == 71
+    assert message.html_text_bytes == 97
     assert message.headers["from"] == "orders@example-shop.test"
     assert message.headers["to"] == "buyer@example-user.test"
     assert message.headers["date"] == "2024-06-02"
@@ -49,10 +52,32 @@ def test_message_to_email_prefers_plaintext_and_html_fallback() -> None:
 
     html_only = load_fixture("get_message_html_only.json")
     html_message = message_to_email(html_only, ref, byte_cap=65536)
+    assert html_message.body_source == "text/html"
+    assert html_message.plain_bytes == 0
+    assert html_message.html_text_bytes > 0
     assert "Hello" in html_message.body_text
     assert "Line two & more" in html_message.body_text
     assert "alert" not in html_message.body_text
     assert "color:red" not in html_message.body_text
+
+
+def test_message_to_email_plain_stub_selects_html() -> None:
+    payload = load_fixture("get_message_plain_stub.json")
+    ref = EmailRef(
+        message_id=payload["id"],
+        thread_id="thread_test_aa",
+        sender="orders@example-shop.test",
+        subject=payload["subject"],
+        received_at=datetime(2024, 6, 2, tzinfo=timezone.utc),
+        snippet=payload["snippet"],
+        received_at_precision="date",
+    )
+    message = message_to_email(payload, ref, byte_cap=65536)
+    assert message.body_source == "text/html (plain stub)"
+    assert message.plain_bytes == 14
+    assert message.html_text_bytes == 93
+    assert "Order #TEST-1001" in message.body_text
+    assert "View in HTML" not in message.body_text
 
 
 def test_message_to_email_truncates_at_utf8_boundary() -> None:

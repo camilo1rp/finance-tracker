@@ -17,7 +17,7 @@ from app.agent.config import (
 )
 from app.agent.schemas import EnrichmentRecommendation
 from app.domain.classification import clean_raw_value
-from app.domain.receipts import MatchKind
+from app.domain.receipts import MatchKind, ReceiptExtraction, dominant_line_item
 from app.models import Transaction, TransactionEvidence, effective_category, effective_merchant
 from app.services.enrichment_service import enrich_transaction
 from app.services.proposal_service import store_proposal, validate_recommendation
@@ -43,8 +43,9 @@ _GET_EVIDENCE_DESCRIPTION = """\
 Read persisted receipt evidence for transactions. Never contacts the mailbox.
 
 transaction_ids must contain 1–50 ids. Returns evidence id, match_kind, confidence, \
-dominant_category, dominant_category_raw, order id, order date, and line-item count. \
-Never returns line-item descriptions.
+dominant_category, dominant_category_raw, the dominant line item's product_type and \
+category_hint, order id, order date, and line-item count. Never returns line-item \
+descriptions.
 """
 
 _LIST_UNMATCHED_DESCRIPTION = """\
@@ -61,6 +62,17 @@ The recommendation is validated against the database (transaction existence, evi
 
 Call this exactly once when the proposal is complete.
 """
+
+
+def _dominant_line_item_fields(extraction: dict) -> tuple[str | None, str | None]:
+    try:
+        parsed = ReceiptExtraction.model_validate(extraction)
+    except (TypeError, ValueError):
+        return None, None
+    dominant = dominant_line_item(parsed.line_items)
+    if dominant is None:
+        return None, None
+    return dominant.product_type, dominant.category_hint
 
 
 def _task_from_state(state: dict | None) -> str:
@@ -149,10 +161,13 @@ def get_evidence(transaction_ids: list[int]) -> str:
             for row in rows:
                 extraction = row.extraction if isinstance(row.extraction, dict) else {}
                 line_items = extraction.get("line_items") or []
+                product_type, category_hint = _dominant_line_item_fields(extraction)
                 lines.append(
                     f"txn {txn_id} evidence={row.id} match={row.match_kind} "
                     f"confidence={row.confidence} category={row.dominant_category} "
                     f"category_raw={row.dominant_category_raw} "
+                    f"product_type={product_type} "
+                    f"category_hint={category_hint} "
                     f"order_id={extraction.get('order_id')} "
                     f"order_date={extraction.get('order_date')} "
                     f"line_item_count={len(line_items)}"

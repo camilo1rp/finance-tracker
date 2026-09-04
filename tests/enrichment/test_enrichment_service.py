@@ -11,8 +11,10 @@ from app.services.enrichment_service import (
     EnrichmentConfig,
     enrich_range,
     enrich_transaction,
+    find_candidates,
     known_categories,
     learn_sender,
+    sender_patterns_for,
 )
 from tests.fakes import FakeEmailSource, FakeExtractor
 
@@ -173,8 +175,10 @@ def test_source_unavailable_outcome(db_session: Session) -> None:
 
 def test_text_hint_and_learning_only_with_star_allowlist(db_session: Session) -> None:
     account = _seed_account(db_session)
-    txn = _txn(db_session, account.id, "5")
-    source = FakeEmailSource([_message("m1", "orders@amazon.com", "amazon order total $25.00")], ["*"])
+    txn = _txn(db_session, account.id, "5", merchant="Post Oak Grill")
+    source = FakeEmailSource(
+        [_message("m1", "orders@postoak.com", "post oak order total $25.00")], ["*"]
+    )
     extractor = FakeExtractor({"m1": ReceiptExtraction(total=Decimal("25.00"), extractor_version="fake", raw_confidence=0.7)})
     outcome = enrich_transaction(
         db_session,
@@ -186,7 +190,83 @@ def test_text_hint_and_learning_only_with_star_allowlist(db_session: Session) ->
     assert outcome.status == "enriched"
     learned = db_session.scalars(select(MerchantSender)).all()
     assert len(learned) == 1
-    assert learned[0].sender_pattern == "orders@amazon.com"
+    assert learned[0].sender_pattern == "orders@postoak.com"
+    assert learned[0].merchant_key == "post oak"
+
+
+def test_hint_path_learned_key_equals_hint_phrase(db_session: Session) -> None:
+    account = _seed_account(db_session)
+    txn = _txn(
+        db_session,
+        account.id,
+        "bestbuy",
+        merchant="Best Buy 1234 Westheimer Rd Houston TX",
+    )
+    source = FakeEmailSource(
+        [_message("m1", "orders@bestbuy.com", "best buy order total $25.00")], ["*"]
+    )
+    extractor = FakeExtractor(
+        {"m1": ReceiptExtraction(total=Decimal("25.00"), extractor_version="fake", raw_confidence=0.7)}
+    )
+    outcome = enrich_transaction(
+        db_session,
+        source,
+        extractor,
+        txn.id,
+        EnrichmentConfig(allow_text_hint=True),
+    )
+    assert outcome.status == "enriched"
+    learned = db_session.scalars(select(MerchantSender)).all()
+    assert len(learned) == 1
+    assert learned[0].merchant_key == "best buy"
+    assert learned[0].sender_pattern == "orders@bestbuy.com"
+    assert learned[0].origin == "learned"
+
+
+def test_hint_path_unmatched_does_not_learn_sender(db_session: Session) -> None:
+    account = _seed_account(db_session)
+    txn = _txn(db_session, account.id, "unmatched-hint", merchant="Post Oak Grill")
+    source = FakeEmailSource(
+        [_message("m1", "newsletter@nasa.gov", "post oak order total $99.00")], ["*"]
+    )
+    extractor = FakeExtractor(
+        {"m1": ReceiptExtraction(total=Decimal("99.00"), extractor_version="fake", raw_confidence=0.9)}
+    )
+    outcome = enrich_transaction(
+        db_session,
+        source,
+        extractor,
+        txn.id,
+        EnrichmentConfig(allow_text_hint=True),
+    )
+    assert outcome.status == "unmatched"
+    assert db_session.scalars(select(MerchantSender)).all() == []
+
+
+def test_hint_path_date_only_does_not_learn_sender(db_session: Session) -> None:
+    account = _seed_account(db_session)
+    txn = _txn(db_session, account.id, "date-only-hint", merchant="Post Oak Grill")
+    source = FakeEmailSource(
+        [_message("m1", "alerts@chase.com", "post oak something")], ["*"]
+    )
+    extractor = FakeExtractor(
+        {
+            "m1": ReceiptExtraction(
+                order_date=date(2024, 6, 2), extractor_version="fake", raw_confidence=0.9
+            )
+        }
+    )
+    outcome = enrich_transaction(
+        db_session,
+        source,
+        extractor,
+        txn.id,
+        EnrichmentConfig(allow_text_hint=True),
+    )
+    assert outcome.status == "enriched"
+    assert outcome.best is not None
+    assert outcome.best.match_kind.value == "date_only"
+    assert db_session.scalars(select(MerchantSender)).all() == []
 
 
 def test_known_categories_merges_canonicals_and_overrides(db_session: Session) -> None:
@@ -246,3 +326,128 @@ def test_enrich_range_continues_past_failure(db_session: Session) -> None:
     assert report.scanned == 2
     assert report.enriched == 1
     assert report.failed == 1
+
+
+def test_enrich_range_restricts_to_txn_ids(db_session: Session) -> None:
+    account = _seed_account(db_session)
+    txn1 = _txn(db_session, account.id, "ids-a")
+    txn2 = _txn(db_session, account.id, "ids-b", merchant="Apple")
+    db_session.add(MerchantSender(merchant_key="amazon", sender_pattern="amazon.com", origin="seed"))
+    db_session.add(MerchantSender(merchant_key="apple", sender_pattern="apple.com", origin="seed"))
+    db_session.commit()
+    source = FakeEmailSource(
+        [_message("m1", "orders@amazon.com"), _message("m2", "orders@apple.com")],
+        ["amazon.com", "apple.com"],
+    )
+    extractor = FakeExtractor(
+        {
+            "m1": ReceiptExtraction(total=Decimal("25.00"), extractor_version="fake", raw_confidence=0.7),
+            "m2": ReceiptExtraction(total=Decimal("25.00"), extractor_version="fake", raw_confidence=0.7),
+        }
+    )
+    factory = sessionmaker(bind=db_session.get_bind(), autocommit=False, autoflush=False)
+    report = enrich_range(
+        factory,
+        source,
+        extractor,
+        date(2024, 6, 1),
+        date(2024, 6, 3),
+        EnrichmentConfig(),
+        txn_ids=[txn1.id],
+    )
+    assert report.scanned == 1
+    assert report.outcomes[0].transaction_id == txn1.id
+    assert txn2.id not in {outcome.transaction_id for outcome in report.outcomes}
+
+
+def test_sender_patterns_for_exact_match(db_session: Session) -> None:
+    db_session.add(MerchantSender(merchant_key="dollar tree", sender_pattern="dollartree.com", origin="seed"))
+    db_session.commit()
+    assert sender_patterns_for(db_session, "dollar tree") == ["dollartree.com"]
+
+
+def test_sender_patterns_for_prefix_substring(db_session: Session) -> None:
+    db_session.add(MerchantSender(merchant_key="dollar tree", sender_pattern="dollartree.com", origin="seed"))
+    db_session.commit()
+    assert sender_patterns_for(
+        db_session, "dollar tree 9523 westheimer rd houston tx"
+    ) == ["dollartree.com"]
+
+
+def test_sender_patterns_for_token_boundary(db_session: Session) -> None:
+    db_session.add(MerchantSender(merchant_key="tree", sender_pattern="tree.com", origin="seed"))
+    db_session.commit()
+    assert sender_patterns_for(db_session, "treehouse") == []
+    assert sender_patterns_for(db_session, "the tree store") == ["tree.com"]
+
+
+def test_sender_patterns_for_longest_wins(db_session: Session) -> None:
+    db_session.add(MerchantSender(merchant_key="dollar", sender_pattern="dollar.com", origin="seed"))
+    db_session.add(MerchantSender(merchant_key="dollar tree", sender_pattern="dollartree.com", origin="seed"))
+    db_session.commit()
+    assert sender_patterns_for(
+        db_session, "dollar tree 9523 westheimer rd houston tx"
+    ) == ["dollartree.com"]
+
+
+def test_sender_patterns_for_no_match(db_session: Session) -> None:
+    db_session.add(MerchantSender(merchant_key="dollar tree", sender_pattern="dollartree.com", origin="seed"))
+    db_session.commit()
+    assert sender_patterns_for(db_session, "home depot") == []
+
+
+def test_find_candidates_resolves_dollar_tree_from_raw_payee(db_session: Session) -> None:
+    account = _seed_account(db_session)
+    txn = _txn(
+        db_session,
+        account.id,
+        "dt",
+        merchant="DOLLAR TREE 9523 WESTHEIMER RD HOUSTON TX",
+    )
+    db_session.add(MerchantSender(merchant_key="dollar tree", sender_pattern="dollartree.com", origin="seed"))
+    db_session.commit()
+    source = FakeEmailSource(
+        [_message("m1", "receipts@dollartree.com")],
+        ["dollartree.com"],
+    )
+    resolution, refs = find_candidates(db_session, source, txn, 2, 7, False)
+    assert resolution == "tolerant:dollar tree"
+    assert [ref.message_id for ref in refs] == ["m1"]
+
+
+def test_sender_patterns_for_amazon_star_payee(db_session: Session) -> None:
+    db_session.add(MerchantSender(merchant_key="amazon", sender_pattern="amazon.com", origin="seed"))
+    db_session.commit()
+    assert sender_patterns_for(db_session, "amazon.com*568eb8rd0") == ["amazon.com"]
+    account = _seed_account(db_session)
+    txn = _txn(db_session, account.id, "amz-star", merchant="AMAZON.COM*568EB8RD0")
+    source = FakeEmailSource([_message("m1", "orders@amazon.com")], ["amazon.com"])
+    resolution, refs = find_candidates(db_session, source, txn, 10, 5, False)
+    assert resolution == "tolerant:amazon"
+    assert [ref.message_id for ref in refs] == ["m1"]
+
+
+def test_sender_patterns_for_union_does_not_shadow_seed(db_session: Session) -> None:
+    db_session.add(
+        MerchantSender(
+            merchant_key="amazon.com*568eb8rd0",
+            sender_pattern="nasa.gov",
+            origin="learned",
+        )
+    )
+    db_session.add(MerchantSender(merchant_key="amazon", sender_pattern="amazon.com", origin="seed"))
+    db_session.commit()
+    assert sender_patterns_for(db_session, "amazon.com*568eb8rd0") == ["nasa.gov", "amazon.com"]
+
+
+def test_find_candidates_skips_hint_path_with_one_token(db_session: Session) -> None:
+    account = _seed_account(db_session)
+    txn = _txn(db_session, account.id, "one-hint", merchant="Amazon")
+    source = FakeEmailSource(
+        [_message("m1", "friend@gmail.com", "amazon is having a sale")],
+        ["*"],
+    )
+    resolution, refs = find_candidates(db_session, source, txn, 2, 7, True)
+    assert resolution == "none"
+    assert refs == []
+    assert source.search_calls == 0

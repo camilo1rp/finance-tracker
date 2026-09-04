@@ -3,11 +3,11 @@ from __future__ import annotations
 import base64
 from datetime import date, datetime, timezone
 
-from app.domain.email_source import AttachmentRef, EmailMessage, EmailRef
+from app.domain.email_source import AttachmentRef, BodySource, EmailMessage, EmailRef
 from app.integrations.gmail_common.text import (
-    html_to_text,
     normalize_headers,
     parse_sender,
+    select_body,
     truncate_utf8,
 )
 
@@ -114,7 +114,7 @@ def _part_body_text(part: dict) -> str:
     return _decode_b64url(str(data))
 
 
-def payload_to_body(payload: dict) -> tuple[str, str]:
+def _payload_parts(payload: dict) -> tuple[str, str]:
     plain_parts: list[str] = []
     html_parts: list[str] = []
     for part in _walk_parts(payload, skip_attachments=True):
@@ -127,11 +127,12 @@ def payload_to_body(payload: dict) -> tuple[str, str]:
             text = _part_body_text(part)
             if text:
                 html_parts.append(text)
-    if plain_parts:
-        return "\n\n".join(plain_parts), "text/plain"
-    if html_parts:
-        return html_to_text("\n\n".join(html_parts)), "text/html"
-    return "", "none"
+    return "\n\n".join(plain_parts), "\n\n".join(html_parts)
+
+
+def payload_to_body(payload: dict) -> tuple[str, BodySource]:
+    body, source, _plain_bytes, _html_text_bytes = select_body(*_payload_parts(payload))
+    return body, source
 
 
 def payload_attachments(msg_id: str, payload: dict) -> list[AttachmentRef]:
@@ -160,7 +161,7 @@ def payload_attachments(msg_id: str, payload: dict) -> list[AttachmentRef]:
 
 def full_to_message(msg: dict, ref: EmailRef, byte_cap: int) -> EmailMessage:
     payload = _payload(msg)
-    body, _source = payload_to_body(payload)
+    body, source, plain_bytes, html_text_bytes = select_body(*_payload_parts(payload))
     body_text, truncated = truncate_utf8(body, byte_cap)
     message_id = str(msg.get("id") or ref.message_id)
     return EmailMessage(
@@ -169,4 +170,7 @@ def full_to_message(msg: dict, ref: EmailRef, byte_cap: int) -> EmailMessage:
         headers=normalize_headers(_header_pairs(payload)),
         attachments=payload_attachments(message_id, payload),
         truncated=truncated,
+        body_source=source,
+        plain_bytes=plain_bytes,
+        html_text_bytes=html_text_bytes,
     )

@@ -17,6 +17,11 @@ SIBLING_WINDOW_DAYS = 5
 MAX_SIBLINGS_FOR_SPLIT = 4
 DATE_ONLY_LOOKBACK_DAYS = 2
 DATE_ONLY_LOOKAHEAD_DAYS = 7
+EXACT_TOTAL_BASE_CONFIDENCE = 0.9
+SPLIT_PARTIAL_BASE_CONFIDENCE = 0.7
+ORDER_ID_CONFIDENCE_BONUS = 0.1
+DATE_ONLY_CONFIDENCE_FACTOR = 0.4
+MATCH_CONFIDENCE_CAP = 1.0
 
 SEED_SENDERS: dict[str, list[str]] = {
     "amazon": ["amazon.com"],
@@ -26,8 +31,39 @@ SEED_SENDERS: dict[str, list[str]] = {
     "netflix": ["netflix.com"],
     "spotify": ["spotify.com"],
     "google": ["google.com"],
-    "microsoft": ["microsoft.com"],
+    "microsoft": ["microsoft.com", "xbox.com"],
+    "cursor": ["cursor.com", "cursor.sh"],
+    "dollar tree": ["dollartree.com"],
 }
+
+_US_STATE_ABBREVIATIONS = frozenset(
+    {
+        "al", "ak", "az", "ar", "ca", "co", "ct", "de", "fl", "ga",
+        "hi", "id", "il", "in", "ia", "ks", "ky", "la", "me", "md",
+        "ma", "mi", "mn", "ms", "mo", "mt", "ne", "nv", "nh", "nj",
+        "nm", "ny", "nc", "nd", "oh", "ok", "or", "pa", "ri", "sc",
+        "sd", "tn", "tx", "ut", "vt", "va", "wa", "wv", "wi", "wy",
+    }
+)
+_MERCHANT_HINT_STOPLIST = frozenset(
+    {"rd", "st", "ave", "blvd", "dr", "ln", "hwy", "ste", "suite", "tx", "ca", "ny", "usa", "us", "inc", "llc"}
+) | _US_STATE_ABBREVIATIONS
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def merchant_tokens(text: str) -> list[str]:
+    return [token for token in _NON_ALNUM.split(text.lower()) if token]
+
+
+def merchant_hint_tokens(merchant_key: str) -> list[str]:
+    kept: list[str] = []
+    for token in merchant_tokens(merchant_key):
+        if token.isdigit() or len(token) <= 2 or token in _MERCHANT_HINT_STOPLIST:
+            continue
+        kept.append(token)
+        if len(kept) == 2:
+            break
+    return kept
 
 
 class LineItem(BaseModel):
@@ -36,6 +72,7 @@ class LineItem(BaseModel):
     description: str
     quantity: Decimal | None = None
     amount: Decimal | None = None
+    product_type: str | None = None
     category_hint: str | None = None
 
 
@@ -129,6 +166,14 @@ def _subset_sum_match(total: Decimal, values: list[Decimal]) -> bool:
     return _walk(0, total, False)
 
 
+def _order_id_bonus(extraction: ReceiptExtraction) -> float:
+    return ORDER_ID_CONFIDENCE_BONUS if extraction.order_id else 0.0
+
+
+def _evidence_confidence(base: float, extraction: ReceiptExtraction) -> float:
+    return min(MATCH_CONFIDENCE_CAP, base + _order_id_bonus(extraction))
+
+
 def match_receipt(
     txn_amount: Decimal,
     txn_date: date,
@@ -155,7 +200,7 @@ def match_receipt(
                 match_kind=MatchKind.EXACT_TOTAL,
                 amount_delta=delta,
                 days_delta=(order_date - txn_date).days if order_date is not None else None,
-                confidence=min(1.0, extraction.raw_confidence + 0.2),
+                confidence=_evidence_confidence(EXACT_TOTAL_BASE_CONFIDENCE, extraction),
                 dominant_category=dominant_category,
                 dominant_category_raw=raw_category,
             )
@@ -172,7 +217,7 @@ def match_receipt(
                 match_kind=MatchKind.SPLIT_PARTIAL,
                 amount_delta=total - (abs_amount + sum(eligible)),
                 days_delta=(order_date - txn_date).days if order_date is not None else None,
-                confidence=extraction.raw_confidence * 0.8,
+                confidence=_evidence_confidence(SPLIT_PARTIAL_BASE_CONFIDENCE, extraction),
                 dominant_category=dominant_category,
                 dominant_category_raw=raw_category,
             )
@@ -190,7 +235,7 @@ def match_receipt(
             match_kind=MatchKind.DATE_ONLY,
             amount_delta=None,
             days_delta=(order_date - txn_date).days,
-            confidence=extraction.raw_confidence * 0.4,
+            confidence=extraction.raw_confidence * DATE_ONLY_CONFIDENCE_FACTOR,
             dominant_category=dominant_category,
             dominant_category_raw=raw_category,
         )
@@ -230,8 +275,18 @@ _ORDER_ID_PATTERNS = [
 _AMOUNT_PATTERN = re.compile(r"(?<!\d)(?:USD\s*)?\$?\s*(\d+\.\d{2})(?!\d)")
 _ISO_DATE_PATTERN = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 _TEXT_DATE_PATTERN = re.compile(
-    r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+\d{4}\b"
+    r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+\d{4}\b"
 )
+
+
+def count_currency_like_tokens(text: str) -> int:
+    return sum(1 for _ in _AMOUNT_PATTERN.finditer(text))
+
+
+def count_date_like_tokens(text: str) -> int:
+    return sum(1 for _ in _ISO_DATE_PATTERN.finditer(text)) + sum(
+        1 for _ in _TEXT_DATE_PATTERN.finditer(text)
+    )
 
 
 class RegexReceiptExtractor(ReceiptExtractor):

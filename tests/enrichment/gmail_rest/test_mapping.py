@@ -34,12 +34,20 @@ def test_metadata_out_of_window_returns_none() -> None:
     assert ref.message_id == "msg_test_old"
 
 
-def test_plain_preferred_over_html() -> None:
+def test_substantive_plain_preferred_over_slightly_longer_html() -> None:
     payload = load_fixture("full_plain_and_html.json")["payload"]
     body, source = payload_to_body(payload)
     assert source == "text/plain"
     assert "Order #TEST-1001" in body
-    assert "ignored because plaintext" not in body
+    assert "Extra HTML-only footer" not in body
+
+
+def test_plain_stub_selects_html() -> None:
+    payload = load_fixture("full_plain_stub_and_html.json")["payload"]
+    body, source = payload_to_body(payload)
+    assert source == "text/html (plain stub)"
+    assert "Order #TEST-1001" in body
+    assert "View in HTML" not in body
 
 
 def test_html_only_converted() -> None:
@@ -96,6 +104,30 @@ def test_full_to_message_headers_attachments_truncation() -> None:
     assert all(key == key.lower() for key in message.headers)
     assert len(message.attachments) == 1
     assert message.truncated is False
+    assert message.body_source == "text/plain"
     tiny = full_to_message(msg, ref, byte_cap=4)
     assert tiny.truncated is True
     assert len(tiny.body_text.encode("utf-8")) <= 4
+
+
+def test_full_to_message_html_body_source() -> None:
+    msg = load_fixture("full_html_only.json")
+    ref = metadata_to_ref(load_fixture("metadata_ok.json"), WINDOW)
+    assert ref is not None
+    message = full_to_message(msg, ref, byte_cap=65536)
+    assert message.body_source == "text/html"
+    assert message.plain_bytes == 0
+    assert message.html_text_bytes > 0
+
+
+def test_full_to_message_records_part_lengths_and_stub_source() -> None:
+    ref = metadata_to_ref(load_fixture("metadata_ok.json"), WINDOW)
+    assert ref is not None
+    substantive = full_to_message(load_fixture("full_plain_and_html.json"), ref, byte_cap=65536)
+    assert substantive.body_source == "text/plain"
+    assert substantive.plain_bytes == 71
+    assert substantive.html_text_bytes == 97
+    stub = full_to_message(load_fixture("full_plain_stub_and_html.json"), ref, byte_cap=65536)
+    assert stub.body_source == "text/html (plain stub)"
+    assert stub.plain_bytes == 14
+    assert stub.html_text_bytes == 93

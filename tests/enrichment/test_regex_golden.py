@@ -16,3 +16,6 @@ def test_regex_extractor_golden_cases() -> None:
         expected = payload["expected"]
         for key, value in expected.items():
             assert dumped.get(key) == value, f"{path.name} key={key}"
+        for item in dumped.get("line_items", []):
+            assert "product_type" in item
+            assert "category_hint" in item

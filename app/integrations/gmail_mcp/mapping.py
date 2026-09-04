@@ -10,7 +10,7 @@ from app.domain.email_source import (
     truncate_text_bytes,
 )
 from app.integrations.gmail_common.query import build_search_query, redact_quoted_phrases
-from app.integrations.gmail_common.text import html_to_text
+from app.integrations.gmail_common.text import html_to_text, select_body
 
 __all__ = [
     "build_search_query",
@@ -72,11 +72,10 @@ def thread_to_refs(thread: dict, window: tuple[date, date]) -> list[EmailRef]:
 
 def message_to_email(msg: dict, ref: EmailRef, byte_cap: int) -> EmailMessage:
     plaintext = str(msg.get("plaintextBody") or "")
-    if plaintext.strip():
-        body = plaintext
-    else:
-        html_body = str(msg.get("htmlBody") or "")
-        body = html_to_text(html_body) if html_body.strip() else ""
+    html_body = str(msg.get("htmlBody") or "")
+    plain = plaintext if plaintext.strip() else ""
+    html = html_body if html_body.strip() else ""
+    body, source, plain_bytes, html_text_bytes = select_body(plain, html)
     body_text, truncated = truncate_text_bytes(body, byte_cap)
     headers: dict[str, str] = {}
     sender = msg.get("sender") or msg.get("from")
@@ -109,4 +108,7 @@ def message_to_email(msg: dict, ref: EmailRef, byte_cap: int) -> EmailMessage:
         headers=headers,
         attachments=attachments,
         truncated=truncated,
+        body_source=source,
+        plain_bytes=plain_bytes,
+        html_text_bytes=html_text_bytes,
     )

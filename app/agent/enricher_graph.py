@@ -29,6 +29,8 @@ When evidence shows a merchant is always one category, add a merchant_rule_sugge
 Finish by calling submit_recommendation exactly once.
 
 If the email source is unavailable, submit immediately with every in-scope transaction in unresolved with reason source_unavailable. Do not retry.
+
+Report only what the evidence states. If product_type is present, name it exactly; if it is absent, say the product is unknown. Never speculate about what an item might be.
 """
 
 

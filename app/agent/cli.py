@@ -22,13 +22,19 @@ from app.agent.coordinator import build_coordinator
 from app.agent.enricher_graph import build_enricher_graph
 from app.agent.steward_graph import build_steward_graph
 from app.agent.tools.subagents import _enricher_summary
+from app.database import init_db
+from app.integrations.gmail_common.query import build_search_query
+from app.models import Transaction
 from app.services.enrichment_service import (
     EnrichmentConfig,
+    InspectReport,
+    _merchant_key_for_transaction,
     enrich_range,
-    find_candidates,
+    inspect_transaction,
+    plan_candidate_search,
+    reset_learned_senders,
     seed_merchant_senders,
 )
-from app.models import Transaction
 
 RECURSION_LIMIT = 25
 
@@ -205,13 +211,89 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--from", dest="date_from")
     parser.add_argument("--to", dest="date_to")
     parser.add_argument("--force", action="store_true")
-    parser.add_argument("--seed-senders", action="store_true")
+    parser.add_argument(
+        "--seed-senders",
+        action="store_true",
+        help="Accepted for compatibility; seeding already runs on every --enrich",
+    )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--inspect",
+        type=int,
+        metavar="TRANSACTION_ID",
+        help="Fetch candidates for one transaction and print inspection stats (no evidence writes)",
+    )
+    parser.add_argument(
+        "--ids",
+        help="Comma-separated transaction ids to restrict enrichment (dry-run and real)",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="With --dry-run, print the Gmail query string per transaction",
+    )
+    parser.add_argument(
+        "--reset-learned",
+        action="store_true",
+        help="Delete merchant_senders rows with origin=learned and exit",
+    )
     return parser.parse_args(argv)
 
 
+def _parse_txn_ids(raw: str | None) -> list[int] | None:
+    if raw is None or not str(raw).strip():
+        return None
+    return [int(part.strip()) for part in str(raw).split(",") if part.strip()]
+
+
+def _reset_learned() -> int:
+    session_factory = get_tool_session_factory()
+    init_db()
+    with session_factory() as db:
+        deleted = reset_learned_senders(db)
+        db.commit()
+    print(f"deleted_learned={deleted}")
+    return 0
+
+
+def _print_inspect(report: InspectReport) -> None:
+    if not report.found:
+        print(f"transaction_id={report.transaction_id} not_found")
+        return
+    print(
+        f"transaction_id={report.transaction_id} "
+        f"resolution={report.resolution} "
+        f"candidates={len(report.candidates)}"
+    )
+    for item in report.candidates:
+        print(
+            f"external_ref={item.external_ref} "
+            f"body_source={item.body_source} "
+            f"body_bytes={item.body_bytes} "
+            f"plain_bytes={item.plain_bytes} "
+            f"html_text_bytes={item.html_text_bytes} "
+            f"truncated={item.truncated} "
+            f"currency_tokens={item.currency_token_count} "
+            f"date_tokens={item.date_token_count} "
+            f"total={item.total} "
+            f"order_date={item.order_date.isoformat() if item.order_date is not None else None} "
+            f"order_id={item.order_id} "
+            f"raw_confidence={item.raw_confidence} "
+            f"product_type={item.product_type} "
+            f"category_hint={item.category_hint}"
+        )
+
+
 def _run_enrich(args: argparse.Namespace) -> int:
-    if not args.date_from or not args.date_to:
+    inspect_id = getattr(args, "inspect", None)
+    id_filter = _parse_txn_ids(getattr(args, "ids", None))
+    parsed_from = date.fromisoformat(args.date_from) if args.date_from else None
+    parsed_to = date.fromisoformat(args.date_to) if args.date_to else None
+    if (
+        inspect_id is None
+        and id_filter is None
+        and (parsed_from is None or parsed_to is None)
+    ):
         raise SystemExit("--from and --to are required with --enrich")
     source = email_source_from_env()
     if source is None:
@@ -223,13 +305,11 @@ def _run_enrich(args: argparse.Namespace) -> int:
         return 1
     extractor = extractor_from_env()
     session_factory = get_tool_session_factory()
-    parsed_from = date.fromisoformat(args.date_from)
-    parsed_to = date.fromisoformat(args.date_to)
-    if args.seed_senders:
-        with session_factory() as db:
-            inserted = seed_merchant_senders(db)
-            db.commit()
-        print(f"seeded_merchant_senders={inserted}")
+    init_db()
+    with session_factory() as db:
+        inserted = seed_merchant_senders(db)
+        db.commit()
+    print(f"seeded_merchant_senders={inserted}")
     config = EnrichmentConfig(
         lookback_days=email_lookback_days(),
         lookahead_days=email_lookahead_days(),
@@ -237,30 +317,44 @@ def _run_enrich(args: argparse.Namespace) -> int:
         force=args.force,
         allow_text_hint=getattr(source, "allowlist", []) == ["*"],
     )
+    if inspect_id is not None:
+        with session_factory() as db:
+            report = inspect_transaction(db, source, extractor, inspect_id, config)
+        _print_inspect(report)
+        return 0 if report.found else 1
     if args.dry_run:
         with session_factory() as db:
-            txn_ids = list(
-                db.scalars(
-                    select(Transaction.id).where(
-                        Transaction.is_spend.is_(True),
-                        Transaction.transaction_date >= parsed_from,
-                        Transaction.transaction_date <= parsed_to,
-                    )
-                ).all()
-            )
+            stmt = select(Transaction.id).where(Transaction.is_spend.is_(True))
+            if parsed_from is not None:
+                stmt = stmt.where(Transaction.transaction_date >= parsed_from)
+            if parsed_to is not None:
+                stmt = stmt.where(Transaction.transaction_date <= parsed_to)
+            if id_filter is not None:
+                stmt = stmt.where(Transaction.id.in_(id_filter))
+            txn_ids = list(db.scalars(stmt.order_by(Transaction.id)).all())
             for txn_id in txn_ids:
                 txn = db.get(Transaction, txn_id)
                 if txn is None:
                     continue
-                refs = find_candidates(
+                resolution, query = plan_candidate_search(
                     db,
-                    source,
                     txn,
                     config.lookback_days,
                     config.lookahead_days,
                     config.allow_text_hint,
                 )
-                print(f"transaction_id={txn.id} candidates={len(refs)}")
+                refs = source.search(query) if query is not None else []
+                merchant = _merchant_key_for_transaction(db, txn) or ""
+                line = (
+                    f"transaction_id={txn.id} "
+                    f'merchant="{merchant[:40]}" '
+                    f"resolution={resolution} "
+                    f"candidates={len(refs)}"
+                )
+                if args.verbose:
+                    gmail_query = build_search_query(query) if query is not None else ""
+                    line = f"{line} gmail_query={gmail_query}"
+                print(line)
         return 0
     report = enrich_range(
         session_factory,
@@ -269,6 +363,7 @@ def _run_enrich(args: argparse.Namespace) -> int:
         parsed_from,
         parsed_to,
         config,
+        txn_ids=id_filter,
     )
     print(
         " ".join(
@@ -302,6 +397,10 @@ def _run_enricher(task: str) -> int:
 
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
+    if getattr(args, "inspect", None) is not None and not args.enrich:
+        raise SystemExit("--inspect requires --enrich")
+    if args.reset_learned:
+        raise SystemExit(_reset_learned())
     if args.enricher:
         raise SystemExit(_run_enricher(args.enricher))
     if args.enrich:

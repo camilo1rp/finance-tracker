@@ -37,6 +37,9 @@ class AttachmentRef:
     size_bytes: int | None
 
 
+BodySource = Literal["text/plain", "text/html", "text/html (plain stub)", "none"]
+
+
 @dataclass(frozen=True)
 class EmailMessage:
     ref: EmailRef
@@ -44,6 +47,9 @@ class EmailMessage:
     headers: dict[str, str]
     attachments: list[AttachmentRef] = field(default_factory=list)
     truncated: bool = False
+    body_source: BodySource = "text/plain"
+    plain_bytes: int = 0
+    html_text_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -258,6 +264,9 @@ class FixtureEmailSource(AllowlistedEmailSource):
             headers=dict(message.headers),
             attachments=list(message.attachments),
             truncated=message.truncated or truncated,
+            body_source=message.body_source,
+            plain_bytes=message.plain_bytes,
+            html_text_bytes=message.html_text_bytes,
         )
 
     def health(self) -> SourceStatus:
@@ -295,10 +304,18 @@ def email_message_from_dict(data: dict, *, byte_cap: int = 65536) -> EmailMessag
             )
         )
     body_text, truncated = truncate_text_bytes(str(data.get("body_text", "")), byte_cap)
+    raw_source = data.get("body_source")
+    if raw_source in {"text/plain", "text/html", "text/html (plain stub)", "none"}:
+        body_source: BodySource = raw_source
+    else:
+        body_source = "none" if not body_text else "text/plain"
     return EmailMessage(
         ref=ref,
         body_text=body_text,
         headers=headers,
         attachments=attachments,
         truncated=bool(data.get("truncated")) or truncated,
+        body_source=body_source,
+        plain_bytes=int(data.get("plain_bytes") or 0),
+        html_text_bytes=int(data.get("html_text_bytes") or 0),
     )

@@ -117,6 +117,9 @@ class FakeEmailSource(AllowlistedEmailSource):
             headers=dict(message.headers),
             attachments=list(message.attachments),
             truncated=message.truncated or truncated,
+            body_source=message.body_source,
+            plain_bytes=message.plain_bytes,
+            html_text_bytes=message.html_text_bytes,
         )
 
     def health(self) -> SourceStatus:

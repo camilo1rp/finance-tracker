@@ -7,6 +7,10 @@ from app.domain.email_source import EmailQuery
 
 _QUOTED_PHRASE = re.compile(r'"[^"]*"')
 
+RECEIPT_SHAPE_CLAUSE = (
+    "(category:purchases OR subject:(order OR receipt OR confirmation OR invoice OR purchase OR payment))"
+)
+
 
 def redact_quoted_phrases(query: str) -> str:
     return _QUOTED_PHRASE.sub('"<redacted>"', query)
@@ -48,10 +52,7 @@ def build_search_query(query: EmailQuery) -> str:
     parts.append(f"before:{_gmail_date(query.date_to + timedelta(days=1))}")
     hints = [hint.strip() for hint in query.text_hints if hint.strip()]
     if hints:
-        quoted = [f'"{hint}"' for hint in hints]
-        if len(quoted) == 1:
-            parts.append(quoted[0])
-        else:
-            parts.append("{" + " ".join(quoted) + "}")
+        parts.append(f'subject:"{" ".join(hints)}"')
+    parts.append(RECEIPT_SHAPE_CLAUSE)
     parts.append("-in:draft")
     return " ".join(parts)

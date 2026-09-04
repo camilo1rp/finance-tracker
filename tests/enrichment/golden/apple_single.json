@@ -20,6 +20,7 @@
     "order_id": "W123456789",
     "order_date": "2024-06-03",
     "total": "1079.00",
-    "extractor_version": "regex-0"
+    "extractor_version": "regex-0",
+    "line_items": []
   }
 }

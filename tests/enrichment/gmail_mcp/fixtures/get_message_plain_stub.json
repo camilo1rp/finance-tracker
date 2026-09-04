@@ -1,13 +1,13 @@
 {
-  "id": "msg_test_confirm_01",
+  "id": "msg_test_stub_01",
   "snippet": "Thanks for your order of the test widget.",
   "subject": "Order confirmation",
   "sender": "orders@example-shop.test",
   "toRecipients": ["buyer@example-user.test"],
   "ccRecipients": [],
   "date": "2024-06-02",
-  "plaintextBody": "Order #TEST-1001\nTotal $25.00\nThank you for shopping with Example Shop.",
-  "htmlBody": "<p>Order #TEST-1001</p><p>Total $25.00</p><p>Thank you for shopping with Example Shop. Extra HTML-only footer.</p>",
+  "plaintextBody": "View in HTML.\n",
+  "htmlBody": "<html><body><h1>Order confirmation</h1><p>Order #TEST-1001</p><p>Total $25.00</p><p>Thank you for shopping with Example Shop.</p></body></html>",
   "attachmentIds": [],
   "attachments": [],
   "labelIds": ["INBOX"]

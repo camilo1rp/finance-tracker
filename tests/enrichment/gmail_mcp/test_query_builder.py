@@ -1,6 +1,7 @@
 from datetime import date
 
 from app.domain.email_source import EmailQuery
+from app.integrations.gmail_common.query import RECEIPT_SHAPE_CLAUSE
 from app.integrations.gmail_mcp.mapping import build_search_query
 
 
@@ -51,9 +52,20 @@ def test_unexpressible_glob_omits_from_clause() -> None:
     assert "from:" not in query
 
 
-def test_hints_quoted_and_or_grouped() -> None:
-    query = build_search_query(_query(text_hints=["widget pack", "order received"]))
-    assert '{"widget pack" "order received"}' in query
+def test_hints_combined_into_single_quoted_subject_phrase() -> None:
+    query = build_search_query(_query(senders=["*"], text_hints=["post", "oak"]))
+    assert 'subject:"post oak"' in query
+    assert '{"post" "oak"}' not in query
+    assert '"post" OR "oak"' not in query
+
+
+def test_receipt_shape_clause_on_sender_and_hint_paths() -> None:
+    sender_query = build_search_query(_query(senders=["orders@example-shop.test"]))
+    hint_query = build_search_query(_query(senders=["*"], text_hints=["post", "oak"]))
+    assert RECEIPT_SHAPE_CLAUSE in sender_query
+    assert RECEIPT_SHAPE_CLAUSE in hint_query
+    assert 'subject:"' not in sender_query
+    assert 'subject:"post oak"' in hint_query
 
 
 def test_date_widened_by_one_day() -> None:

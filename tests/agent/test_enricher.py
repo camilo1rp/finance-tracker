@@ -1,8 +1,10 @@
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -73,6 +75,7 @@ def _extraction(total: str, day: int, description: str = "Latte") -> ReceiptExtr
             LineItem(
                 description=description,
                 amount=Decimal(total),
+                product_type=None,
                 category_hint="Dining",
             )
         ],
@@ -331,7 +334,14 @@ def test_get_evidence_omits_line_item_descriptions(
             extraction={
                 "order_id": "ORD-10",
                 "order_date": "2024-07-10",
-                "line_items": [{"description": SENTINEL, "amount": "25.00"}],
+                "line_items": [
+                    {
+                        "description": SENTINEL,
+                        "amount": "25.00",
+                        "product_type": "television",
+                        "category_hint": "electronics",
+                    }
+                ],
             },
             match_kind="exact_total",
             confidence=0.9,
@@ -343,6 +353,10 @@ def test_get_evidence_omits_line_item_descriptions(
     db_session.commit()
     text = get_evidence.invoke({"transaction_ids": [t1.id]})
     assert SENTINEL not in text
+    assert "description=" not in text
+    assert "product_type=television" in text
+    assert "category_hint=electronics" in text
+    assert "category_raw=Dining" in text
     assert "line_item_count=1" in text
     assert "ORD-10" in text
 
@@ -420,6 +434,126 @@ def test_enricher_writes_no_effective_values(
     assert db_session.scalar(select(func.count()).select_from(TransactionEvidence)) >= 1
 
 
+class _EchoLastToolChatModel(ScriptedChatModel):
+    """Scripted model that copies the latest tool output into content and submit narrative."""
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[no-untyped-def]
+        response = self.responses[min(self.i, len(self.responses) - 1)]
+        if self.i < len(self.responses) - 1:
+            self.i += 1
+        last_tool_content = ""
+        for message in reversed(list(messages)):
+            if getattr(message, "type", None) == "tool":
+                last_tool_content = str(getattr(message, "content", "") or "")
+                break
+        if not last_tool_content:
+            return ChatResult(generations=[ChatGeneration(message=response)])
+        tool_calls = []
+        for call in response.tool_calls or []:
+            payload = dict(call) if isinstance(call, dict) else {
+                "name": getattr(call, "name", None),
+                "args": dict(getattr(call, "args", {}) or {}),
+                "id": getattr(call, "id", None),
+            }
+            if payload.get("name") == "submit_recommendation":
+                args = dict(payload.get("args") or {})
+                rec = dict(args.get("recommendation") or {})
+                rec["narrative"] = last_tool_content
+                payload["args"] = {**args, "recommendation": rec}
+            tool_calls.append(payload)
+        echoed = AIMessage(content=last_tool_content, tool_calls=tool_calls)
+        return ChatResult(generations=[ChatGeneration(message=echoed)])
+
+
+def test_scripted_enricher_echoes_product_type_from_evidence(
+    db_session: Session, shop_txns: tuple[Transaction, Transaction], agent_sessions
+) -> None:
+    t1, _t2 = shop_txns
+    db_session.add(
+        TransactionEvidence(
+            transaction_id=t1.id,
+            kind="email_receipt",
+            provider="fake",
+            external_ref="fake:tv",
+            extraction={
+                "order_id": "ORD-TV",
+                "order_date": "2024-07-10",
+                "line_items": [
+                    {
+                        "description": SENTINEL,
+                        "amount": "25.00",
+                        "product_type": "television",
+                        "category_hint": "electronics",
+                    }
+                ],
+            },
+            match_kind="exact_total",
+            confidence=0.9,
+            dominant_category="unknown",
+            dominant_category_raw="electronics",
+            extractor_version="fake",
+        )
+    )
+    db_session.commit()
+    evidence_id = db_session.scalars(select(TransactionEvidence.id)).one()
+    model = _EchoLastToolChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_evidence",
+                        "args": {"transaction_ids": [t1.id]},
+                        "id": "call-1",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "submit_recommendation",
+                        "args": {
+                            "recommendation": {
+                                "proposed_overrides": [
+                                    {
+                                        "transaction_id": t1.id,
+                                        "category": "electronics",
+                                        "evidence_ids": [evidence_id],
+                                        "confidence": 0.95,
+                                        "rationale": "dominant line item",
+                                    }
+                                ],
+                                "merchant_rule_suggestions": [],
+                                "unresolved": [],
+                                "narrative": "placeholder",
+                                "new_categories": ["electronics"],
+                            }
+                        },
+                        "id": "call-2",
+                    }
+                ],
+            ),
+        ]
+    )
+    graph = build_enricher_graph(model=model)
+    result = graph.invoke(
+        {"messages": [{"role": "user", "content": f"Research transaction {t1.id}"}]},
+        {"recursion_limit": 15},
+    )
+    proposal = db_session.scalars(select(EnrichmentProposal)).one()
+    assert "television" in proposal.recommendation["narrative"]
+    assert SENTINEL not in proposal.recommendation["narrative"]
+    echoed = None
+    for message in result.get("messages") or []:
+        if getattr(message, "type", None) == "ai" and "television" in (
+            getattr(message, "content", "") or ""
+        ):
+            echoed = message.content
+    assert echoed is not None
+    assert SENTINEL not in echoed
+
+
 def test_system_prompt_contains_required_constraints() -> None:
     prompt = ENRICHER_SYSTEM_PROMPT
     assert "submit_recommendation" in prompt
@@ -428,3 +562,12 @@ def test_system_prompt_contains_required_constraints() -> None:
     assert "get_evidence" in prompt
     assert "source_unavailable" in prompt
     assert "merchant_rule_suggestions" in prompt
+    assert (
+        "Report only what the evidence states. If product_type is present, name it exactly; "
+        "if it is absent, say the product is unknown. Never speculate about what an item might be."
+    ) in prompt
+
+
+def test_enricher_prompt_is_verbatim_in_project_map() -> None:
+    text = Path("docs/PROJECT-MAP.md").read_text()
+    assert ENRICHER_SYSTEM_PROMPT.strip() in text
