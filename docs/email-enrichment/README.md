@@ -1,6 +1,6 @@
 # Email enrichment — closing summary
 
-Delivered across Tasks 00–03 and 02C, 12 commits, suite at 253 passed + 2 deselected.
+Delivered across Tasks 00–03 and 02C, 14 commits, suite at 298 passed + 2 deselected.
 
 ## What exists
 
@@ -21,7 +21,7 @@ Delivered across Tasks 00–03 and 02C, 12 commits, suite at 253 passed + 2 dese
 
 ## How to operate it
 
-Path 1 (`gmail_rest`) first. Details in `docs/email-enrichment/GMAIL-SETUP.md`.
+Path 1 (`gmail_rest`) first. Details in `docs/email-enrichment/GMAIL-SETUP.md`. Live-run lessons from the first real mailbox: `docs/email-enrichment/LIVE-RUN-LESSONS.md`.
 
 1. Create a GCP project, enable the Gmail API, configure an External OAuth consent screen with yourself as a test user, request only `gmail.readonly`, create a Desktop OAuth client, obtain a refresh token.
 2. Set `EMAIL_PROVIDER=gmail_rest`, `EMAIL_SENDER_ALLOWLIST` (start narrow: one merchant domain), and the `GMAIL_OAUTH_*` trio (or `GMAIL_ACCESS_TOKEN` / `EMAIL_MCP_ACCESS_TOKEN` for a quick test). Optionally `EXTRACTION_MODEL`; without it the regex extractor runs.
@@ -46,6 +46,6 @@ Path 2 (`gmail` MCP) is only for Workspace accounts enrolled in the Developer Pr
 
 `transaction_overrides` is provenance, not precedence. `mark_consumed` commits after the apply commit, by design. Both Gmail adapters exist because MCP is gated on Developer Preview (and has open defects for enrolled users); REST is the primary path for any Google account. `external_ref` stays `gmail:<id>` for both so evidence deduplicates across them; `TransactionEvidence.provider` records `gmail_rest` vs `gmail` for audit. REST `messages.list` returns ids only, so search makes N+1 `messages.get?format=metadata` calls, bounded by `max_results` (≤ 10 by default) and `page_cap`. MCP Gmail dates are day-precision; REST uses `internalDate` at datetime precision. Gmail `from:` is fuzzy, so the allowlist is re-applied post-search. The confidence threshold lives in the validator, not the prompt. The enricher ends via a submit tool, not structured output.
 
-## Deferred
+## Next candidates (not started)
 
-Split transactions (one charge, several categories — line items are already retained in evidence for this). Attachment download / PDF receipts. Microsoft 365 or IMAP adapters (`EmailSource` is the seam; `gmail_common` is the shared Gmail layer). Scheduled bulk enrichment beyond the CLI. Chat UI on the existing thread/interrupt contract. Proposal expiry / cleanup of `open` proposals.
+Model-based triage of candidate *metadata* before fetch (reduces fetches, allows looser retrieval; reads subjects/snippets only). `category:purchases` as a first-pass pre-filter. Multiple mailboxes per user. Splits for multi-category orders (line items already retained). Attachment/PDF receipts. Proposal expiry for stale `open` rows.

@@ -12,7 +12,7 @@ Planning reference for `finance-tracker-skeleton`. Derived from source and tests
 | Working tree | Email enrichment + two Gmail adapters (`gmail_rest` primary, `gmail` MCP) |
 | Python (venv) | 3.14.5 (Studio requires ≥3.11 and &lt;3.14; use Dockerfile 3.12 or a 3.11–3.13 venv) |
 | Dockerfile base | `python:3.12-slim` |
-| Tests | **253 passed**, 2 deselected (`live_gmail`, `live_gmail_rest`) (`pytest -q`) |
+| Tests | **298 passed**, 2 deselected (`live_gmail`, `live_gmail_rest`) (`pytest -q`) |
 
 ### Reconciled counts
 
@@ -22,7 +22,7 @@ Planning reference for `finance-tracker-skeleton`. Derived from source and tests
 | Tables | **9** (`owners`, `accounts`, `normalization_mappings`, `import_batches`, `transactions`, `transaction_evidence`, `merchant_senders`, `transaction_overrides`, `enrichment_proposals`) |
 | Agent tools | **21** (17 read / 3 gate-or-delegate / 1 observation-cache submit; **0** DB-apply tools) |
 | Graphs in `langgraph.json` | **4** (`coordinator`, `steward`, `analyst`, `enricher`) |
-| Tests passing | **253** (+ 2 deselected `live_gmail`, `live_gmail_rest`) |
+| Tests passing | **298** (+ 2 deselected `live_gmail`, `live_gmail_rest`) |
 
 ### Versions
 
