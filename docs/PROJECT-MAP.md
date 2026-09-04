@@ -8,9 +8,8 @@ Planning reference for `finance-tracker-skeleton`. Derived from source and tests
 |---|---|
 | Generated | 2026-09-04 |
 | Branch | `main` |
-| HEAD SHA | `28dd469` |
-| Enrichment range | **13** commits `265803b`…`28dd469` (enrichment A through live-run lessons) |
-| Working tree | **dirty** vs HEAD. This map is derived from the **working tree**, not the commit blob. Uncommitted: email enrichment adapters, CLI, extractors, tests, this document. |
+| HEAD SHA | `4769fa9` |
+| Enrichment range | **13** commits `265803b`…`28dd469` (enrichment A through live-run lessons), plus closeout `4769fa9` |
 | Python (venv, as of generation) | 3.14.5. **Studio requires ≥3.11 and &lt;3.14** — do not plan Studio against this venv; use Dockerfile 3.12 or a 3.11–3.13 venv. [D] Studio pin from LangGraph CLI docs / `langgraph.json` comment in prior map; Dockerfile is [C] `python:3.12-slim`. |
 | Dockerfile base | `python:3.12-slim` [C] |
 | Tests | **300 passed**, 2 deselected (`live_gmail`, `live_gmail_rest`) (`pytest --collect-only`: 300/302) [T] |
