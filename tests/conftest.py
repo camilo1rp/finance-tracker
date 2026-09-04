@@ -1,6 +1,7 @@
 import os
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+os.environ.setdefault("GMAIL_ACCESS_TOKEN", "")
 
 # Set before any app import so load_dotenv() cannot refill tracing from .env.
 _TRACING_DISABLED = {

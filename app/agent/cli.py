@@ -217,6 +217,10 @@ def _run_enrich(args: argparse.Namespace) -> int:
     if source is None:
         print(f"EMAIL_PROVIDER={email_provider()} produced no email source")
         return 1
+    status = source.health()
+    if not status.available:
+        print(status.detail or "unavailable")
+        return 1
     extractor = extractor_from_env()
     session_factory = get_tool_session_factory()
     parsed_from = date.fromisoformat(args.date_from)

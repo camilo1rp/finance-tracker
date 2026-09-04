@@ -1,0 +1,23 @@
+{
+  "id": "msg_test_bad_from",
+  "threadId": "thread_test_bad",
+  "snippet": "No usable sender.",
+  "internalDate": "1717329600000",
+  "payload": {
+    "mimeType": "text/plain",
+    "headers": [
+      {
+        "name": "From",
+        "value": "Not a sender"
+      },
+      {
+        "name": "Subject",
+        "value": "Broken"
+      },
+      {
+        "name": "Date",
+        "value": "Sun, 2 Jun 2024 12:00:00 +0000"
+      }
+    ]
+  }
+}

@@ -67,11 +67,13 @@ class FakeEmailSource(AllowlistedEmailSource):
         status: SourceStatus | None = None,
         byte_cap: int = 65536,
         raise_unavailable: bool = False,
+        provider_name: str | None = None,
     ) -> None:
         super().__init__(allowlist)
         self._messages = {message.ref.message_id: message for message in messages}
         self._status = status or SourceStatus(available=True, provider="fake")
-        self.provider = self._status.provider
+        self.provider_name = provider_name if provider_name is not None else self._status.provider
+        self.provider = self.provider_name
         self._byte_cap = byte_cap
         self.raise_unavailable = raise_unavailable
         self.search_calls = 0
@@ -169,3 +171,48 @@ class FakeExtractor(ReceiptExtractor):
         if self.default is not None:
             return self.default
         raise KeyError(message.ref.message_id)
+
+
+class FakeGmailRestClient:
+    _KNOWN = frozenset(
+        {"list_messages", "get_message_metadata", "get_message_full", "get_profile"}
+    )
+
+    def __init__(self, responses: dict[str, list[dict | Exception]]) -> None:
+        self.responses = {name: list(payloads) for name, payloads in responses.items()}
+        self.calls: list[tuple[str, dict]] = []
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        def _unknown(*_args, **_kwargs):
+            raise EmailSourceError("endpoint_not_allowed")
+
+        return _unknown
+
+    def _dispatch(self, name: str, **params):
+        if name not in self._KNOWN:
+            raise EmailSourceError("endpoint_not_allowed")
+        self.calls.append((name, dict(params)))
+        queue = self.responses.setdefault(name, [])
+        if not queue:
+            return {}
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def list_messages(self, q: str, max_results: int, page_token: str | None) -> dict:
+        return self._dispatch(
+            "list_messages", q=q, max_results=max_results, page_token=page_token
+        )
+
+    def get_message_metadata(self, message_id: str) -> dict:
+        return self._dispatch("get_message_metadata", id=message_id)
+
+    def get_message_full(self, message_id: str) -> dict:
+        return self._dispatch("get_message_full", id=message_id)
+
+    def get_profile(self) -> dict:
+        return self._dispatch("get_profile")

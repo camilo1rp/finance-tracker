@@ -12,7 +12,8 @@ from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 from app.domain.email_source import EmailSourceError, EmailSourceUnavailable
-from app.integrations.gmail_mcp.auth import TokenProvider
+from app.integrations.gmail_common.auth import TokenProvider
+from app.integrations.gmail_common.errors import map_http_status
 
 ALLOWED_TOOLS = frozenset({"search_threads", "get_message", "list_labels"})
 _RETRY_DELAYS_S = (0.5, 2.0)
@@ -45,12 +46,12 @@ def classify_transport_error(exc: BaseException) -> tuple[str, bool]:
     if isinstance(exc, httpx.ConnectError):
         return "timeout", False
     status = _http_status(exc)
-    if status in {401, 403}:
-        return "auth", False
-    if status == 429:
-        return "rate_limited", True
-    if status is not None and status >= 500:
-        return "server", True
+    if status is None:
+        return "server", False
+    mapped = map_http_status(status, None)
+    if isinstance(mapped, EmailSourceUnavailable):
+        reason = str(mapped)
+        return reason, reason in {"rate_limited", "server"}
     return "server", False
 
 
@@ -139,16 +140,16 @@ class StreamableHttpMcpTransport(McpTransport):
         if name not in ALLOWED_TOOLS:
             raise EmailSourceError("tool_not_allowed")
 
-        def once() -> dict:
-            async def operation(session: ClientSession) -> dict:
-                result = await session.call_tool(name, arguments)
-                if getattr(result, "isError", False):
-                    raise EmailSourceError(name)
-                return tool_result_as_dict(result)
+        def once() -> Any:
+            async def operation(session: ClientSession) -> Any:
+                return await session.call_tool(name, arguments)
 
             return invoke_mcp(self.url, self._headers(), self.timeout_s, operation)
 
-        return self._retrying(once)
+        result = self._retrying(once)
+        if getattr(result, "isError", False):
+            raise EmailSourceError(name)
+        return tool_result_as_dict(result)
 
     def list_tools_detailed(self) -> list[dict[str, Any]]:
         def once() -> list[dict[str, Any]]:

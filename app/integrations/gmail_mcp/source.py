@@ -51,7 +51,8 @@ class McpEmailSource(AllowlistedEmailSource):
         self.transport = transport
         self.byte_cap = byte_cap
         self.page_cap = page_cap
-        self.provider = "gmail"
+        self.provider_name = "gmail"
+        self.provider = self.provider_name
 
     @traceable(process_inputs=_source_trace_inputs, process_outputs=_source_trace_outputs)
     def search(self, query: EmailQuery) -> list[EmailRef]:

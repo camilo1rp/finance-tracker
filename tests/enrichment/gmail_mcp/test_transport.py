@@ -75,8 +75,12 @@ def test_is_error_uses_tool_name_without_server_text(monkeypatch: pytest.MonkeyP
     import asyncio
 
     secret = "secret body from the mailbox"
+    calls: list[int] = []
+    sleeps: list[float] = []
 
     def fake_invoke(_url, _headers, _timeout_s, operation):
+        calls.append(1)
+
         class Session:
             async def call_tool(self, _name, _arguments):
                 return SimpleNamespace(
@@ -88,9 +92,13 @@ def test_is_error_uses_tool_name_without_server_text(monkeypatch: pytest.MonkeyP
         return asyncio.run(operation(Session()))
 
     monkeypatch.setattr("app.integrations.gmail_mcp.transport.invoke_mcp", fake_invoke)
+    monkeypatch.setattr("app.integrations.gmail_mcp.transport.time.sleep", sleeps.append)
     with pytest.raises(EmailSourceError, match="^get_message$") as exc_info:
         _transport().call_tool("get_message", {"messageId": "msg_test_01"})
+    assert type(exc_info.value) is EmailSourceError
     assert secret not in str(exc_info.value)
+    assert calls == [1]
+    assert sleeps == []
 
 
 def test_classify_5xx_is_retryable_server() -> None:

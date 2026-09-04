@@ -6,8 +6,13 @@ from app.domain.receipt_extractors import _extract_trace_inputs, _extract_trace_
 from app.domain.receipts import LineItem, ReceiptExtraction, receipt_extraction_dump
 from app.integrations.gmail_mcp.mapping import build_search_query
 from app.integrations.gmail_mcp.source import McpEmailSource, _source_trace_inputs, _source_trace_outputs
+from app.integrations.gmail_rest.source import (
+    GmailRestEmailSource,
+    _source_trace_inputs as _rest_trace_inputs,
+    _source_trace_outputs as _rest_trace_outputs,
+)
 from app.services.enrichment_service import _enrichment_trace_inputs, _enrichment_trace_outputs
-from tests.fakes import FakeMcpTransport
+from tests.fakes import FakeGmailRestClient, FakeMcpTransport
 
 
 def test_tracing_redacts_email_content() -> None:
@@ -86,3 +91,46 @@ def test_gmail_adapter_methods_redact_hints_and_query() -> None:
     source = McpEmailSource(transport, ["example-shop.test"], byte_cap=1024)
     status = source.health()
     assert status.available is True
+
+
+def test_gmail_rest_adapter_methods_redact_hints_and_query() -> None:
+    query = EmailQuery(
+        senders=["example-shop.test"],
+        date_from=date(2024, 6, 1),
+        date_to=date(2024, 6, 3),
+        text_hints=["secret merchant phrase"],
+        max_results=5,
+    )
+    redacted = _rest_trace_inputs({"self": object(), "query": query})
+    assert redacted["query"]["text_hints"] == ["<redacted>"]
+    assert "secret merchant phrase" not in redacted["gmail_query"]
+    assert '"<redacted>"' in redacted["gmail_query"]
+    assert "from:example-shop.test" in redacted["gmail_query"]
+
+    message = EmailMessage(
+        ref=EmailRef(
+            message_id="msg_test_01",
+            thread_id=None,
+            sender="orders@example-shop.test",
+            subject="Receipt",
+            received_at=datetime(2024, 6, 2, 12, 0, 0),
+            snippet="secret snippet",
+            received_at_precision="datetime",
+        ),
+        body_text="secret body",
+        headers={"from": "orders@example-shop.test"},
+        attachments=[],
+        truncated=False,
+    )
+    fetch_inputs = _rest_trace_inputs({"self": object(), "ref": message.ref})
+    assert fetch_inputs["ref"]["snippet"] == "<redacted>"
+    fetch_outputs = _rest_trace_outputs(message)
+    assert fetch_outputs["body_text"] == "<redacted>"
+    health_outputs = _rest_trace_outputs({"available": True, "provider": "gmail_rest"})
+    assert health_outputs["provider"] == "gmail_rest"
+
+    client = FakeGmailRestClient({"get_profile": [{"emailAddress": "casey@example-user.test"}]})
+    source = GmailRestEmailSource(client, ["example-shop.test"], byte_cap=1024)
+    status = source.health()
+    assert status.available is True
+    assert status.account_hint == "c***@example-user.test"

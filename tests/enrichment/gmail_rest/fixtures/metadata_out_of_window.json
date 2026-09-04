@@ -1,0 +1,23 @@
+{
+  "id": "msg_test_old",
+  "threadId": "thread_test_old",
+  "snippet": "Old order.",
+  "internalDate": "1714564800000",
+  "payload": {
+    "mimeType": "text/plain",
+    "headers": [
+      {
+        "name": "From",
+        "value": "orders@example-shop.test"
+      },
+      {
+        "name": "Subject",
+        "value": "Old"
+      },
+      {
+        "name": "Date",
+        "value": "Wed, 1 May 2024 12:00:00 +0000"
+      }
+    ]
+  }
+}

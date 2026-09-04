@@ -210,12 +210,17 @@ def _best_match(current: EvidenceMatch | None, candidate: EvidenceMatch) -> Evid
     return candidate if candidate_key > current_key else current
 
 
+_GMAIL_EXTERNAL_REF_PREFIXES = frozenset({"gmail", "gmail_rest"})
+
+
 def _source_provider(source: EmailSource) -> str:
-    return getattr(source, "provider", None) or source.health().provider
+    return source.provider_name
 
 
 def _evidence_external_ref(source: EmailSource, message: EmailMessage) -> str:
-    return f"{_source_provider(source)}:{message.ref.message_id}"
+    name = _source_provider(source)
+    prefix = "gmail" if name in _GMAIL_EXTERNAL_REF_PREFIXES else name
+    return f"{prefix}:{message.ref.message_id}"
 
 
 def _upsert_evidence(

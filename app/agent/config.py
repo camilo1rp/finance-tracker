@@ -35,6 +35,8 @@ DEFAULT_EMAIL_BODY_BYTE_CAP = 65536
 DEFAULT_ENRICHMENT_CONFIDENCE_THRESHOLD = 0.8
 DEFAULT_EMAIL_MCP_URL = "https://gmailmcp.googleapis.com/mcp/v1"
 DEFAULT_EMAIL_MCP_TIMEOUT_S = 20.0
+DEFAULT_GMAIL_REST_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/"
+DEFAULT_GMAIL_REST_TIMEOUT_S = 20.0
 
 
 def model_name() -> str:
@@ -102,11 +104,22 @@ def email_mcp_timeout_s() -> float:
     return float(os.environ.get("EMAIL_MCP_TIMEOUT_S", str(DEFAULT_EMAIL_MCP_TIMEOUT_S)))
 
 
+def gmail_rest_base_url() -> str:
+    return os.environ.get("GMAIL_REST_BASE_URL", DEFAULT_GMAIL_REST_BASE_URL)
+
+
+def gmail_rest_timeout_s() -> float:
+    return float(os.environ.get("GMAIL_REST_TIMEOUT_S", str(DEFAULT_GMAIL_REST_TIMEOUT_S)))
+
+
 def token_provider_from_env():
     from app.domain.email_source import EmailSourceUnavailable
-    from app.integrations.gmail_mcp.auth import RefreshTokenProvider, StaticTokenProvider
+    from app.integrations.gmail_common.auth import RefreshTokenProvider, StaticTokenProvider
 
-    static = os.environ.get("EMAIL_MCP_ACCESS_TOKEN", "").strip()
+    static = (
+        os.environ.get("GMAIL_ACCESS_TOKEN", "").strip()
+        or os.environ.get("EMAIL_MCP_ACCESS_TOKEN", "").strip()
+    )
     if static:
         return StaticTokenProvider(static)
     client_id = os.environ.get("GMAIL_OAUTH_CLIENT_ID", "").strip()
@@ -123,6 +136,20 @@ def email_source_from_env():
     provider = email_provider()
     if provider == "none":
         return None
+    if provider == "gmail_rest":
+        from app.integrations.gmail_rest.client import GmailRestClient
+        from app.integrations.gmail_rest.source import GmailRestEmailSource
+
+        client = GmailRestClient(
+            token_provider_from_env(),
+            gmail_rest_base_url(),
+            gmail_rest_timeout_s(),
+        )
+        return GmailRestEmailSource(
+            client,
+            parse_allowlist(email_sender_allowlist()),
+            email_body_byte_cap(),
+        )
     if provider == "gmail":
         from app.integrations.gmail_mcp.source import McpEmailSource
         from app.integrations.gmail_mcp.transport import StreamableHttpMcpTransport

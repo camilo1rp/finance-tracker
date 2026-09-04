@@ -1,0 +1,40 @@
+{
+  "id": "msg_test_single_01",
+  "threadId": "thread_test_single",
+  "snippet": "Single part",
+  "internalDate": "1717329600000",
+  "payload": {
+    "mimeType": "text/plain",
+    "filename": "",
+    "headers": [
+      {
+        "name": "From",
+        "value": "Example Shop <orders@example-shop.test>"
+      },
+      {
+        "name": "To",
+        "value": "buyer@example-user.test"
+      },
+      {
+        "name": "Subject",
+        "value": "Order confirmation"
+      },
+      {
+        "name": "Date",
+        "value": "Sun, 2 Jun 2024 12:00:00 +0000"
+      },
+      {
+        "name": "Message-ID",
+        "value": "<msg-test-01@example-shop.test>"
+      },
+      {
+        "name": "X-Ignored",
+        "value": "should-not-appear"
+      }
+    ],
+    "body": {
+      "size": 27,
+      "data": "U2luZ2xlLXBhcnQgcGxhaW50ZXh0IGJvZHku"
+    }
+  }
+}

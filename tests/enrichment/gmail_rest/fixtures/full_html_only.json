@@ -1,0 +1,40 @@
+{
+  "id": "msg_test_html_01",
+  "threadId": "thread_test_html",
+  "snippet": "Hello",
+  "internalDate": "1717329600000",
+  "payload": {
+    "mimeType": "text/html",
+    "filename": "",
+    "headers": [
+      {
+        "name": "From",
+        "value": "Example Shop <orders@example-shop.test>"
+      },
+      {
+        "name": "To",
+        "value": "buyer@example-user.test"
+      },
+      {
+        "name": "Subject",
+        "value": "Order confirmation"
+      },
+      {
+        "name": "Date",
+        "value": "Sun, 2 Jun 2024 12:00:00 +0000"
+      },
+      {
+        "name": "Message-ID",
+        "value": "<msg-test-01@example-shop.test>"
+      },
+      {
+        "name": "X-Ignored",
+        "value": "should-not-appear"
+      }
+    ],
+    "body": {
+      "size": 129,
+      "data": "PGh0bWw-PGhlYWQ-PHN0eWxlPnB7Y29sb3I6cmVkfTwvc3R5bGU-PC9oZWFkPjxib2R5PjxzY3JpcHQ-YWxlcnQoMSk8L3NjcmlwdD48cD5IZWxsbzwvcD48cD5MaW5lIHR3byAmYW1wOyBtb3JlPC9wPjwvYm9keT48L2h0bWw-"
+    }
+  }
+}

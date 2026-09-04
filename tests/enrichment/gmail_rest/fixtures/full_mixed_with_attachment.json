@@ -1,0 +1,82 @@
+{
+  "id": "msg_test_mixed_01",
+  "threadId": "thread_test_mixed",
+  "snippet": "Invoice attached",
+  "internalDate": "1717329600000",
+  "payload": {
+    "mimeType": "multipart/mixed",
+    "filename": "",
+    "headers": [
+      {
+        "name": "From",
+        "value": "Example Shop <orders@example-shop.test>"
+      },
+      {
+        "name": "To",
+        "value": "buyer@example-user.test"
+      },
+      {
+        "name": "Subject",
+        "value": "Order confirmation"
+      },
+      {
+        "name": "Date",
+        "value": "Sun, 2 Jun 2024 12:00:00 +0000"
+      },
+      {
+        "name": "Message-ID",
+        "value": "<msg-test-01@example-shop.test>"
+      },
+      {
+        "name": "X-Ignored",
+        "value": "should-not-appear"
+      }
+    ],
+    "parts": [
+      {
+        "partId": "0",
+        "mimeType": "multipart/alternative",
+        "filename": "",
+        "parts": [
+          {
+            "partId": "0.0",
+            "mimeType": "text/plain",
+            "filename": "",
+            "body": {
+              "size": 36,
+              "data": "TmVzdGVkIHBsYWluIGJvZHkgZm9yIG1peGVkIG1lc3NhZ2Uu"
+            }
+          },
+          {
+            "partId": "0.1",
+            "mimeType": "text/html",
+            "filename": "",
+            "body": {
+              "size": 45,
+              "data": "PHA-TmVzdGVkIEhUTUwgdGhhdCBzaG91bGQgbG9zZSB0byBwbGFpbi48L3A-"
+            }
+          }
+        ]
+      },
+      {
+        "partId": "1",
+        "mimeType": "application/pdf",
+        "filename": "invoice-test.pdf",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "application/pdf"
+          },
+          {
+            "name": "Content-Disposition",
+            "value": "attachment; filename=\"invoice-test.pdf\""
+          }
+        ],
+        "body": {
+          "attachmentId": "att_test_01",
+          "size": 2048
+        }
+      }
+    ]
+  }
+}

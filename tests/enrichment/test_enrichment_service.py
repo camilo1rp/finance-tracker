@@ -118,6 +118,27 @@ def test_force_reruns_without_duplicates(db_session: Session) -> None:
     assert stored.extractor_version == "v2"
 
 
+def test_evidence_provider_name_and_shared_gmail_external_ref(db_session: Session) -> None:
+    account = _seed_account(db_session)
+    txn = _txn(db_session, account.id, "2b")
+    db_session.add(MerchantSender(merchant_key="amazon", sender_pattern="amazon.com", origin="seed"))
+    db_session.commit()
+    source = FakeEmailSource(
+        [_message("msg_test_01", "orders@amazon.com")],
+        ["amazon.com"],
+        provider_name="gmail_rest",
+    )
+    extractor = FakeExtractor(
+        {"msg_test_01": ReceiptExtraction(total=Decimal("25.00"), extractor_version="fake", raw_confidence=0.7)}
+    )
+    outcome = enrich_transaction(db_session, source, extractor, txn.id, EnrichmentConfig())
+    assert outcome.status == "enriched"
+    stored = db_session.scalars(select(TransactionEvidence)).one()
+    assert stored.provider == "gmail_rest"
+    assert stored.provider == source.provider_name
+    assert stored.external_ref == "gmail:msg_test_01"
+
+
 def test_failure_rolls_back_to_zero_rows(db_session: Session) -> None:
     account = _seed_account(db_session)
     txn = _txn(db_session, account.id, "3")

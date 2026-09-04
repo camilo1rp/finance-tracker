@@ -1,103 +1,30 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from email.utils import parseaddr
-from html.parser import HTMLParser
-import html
-import re
 
 from app.domain.email_source import (
     AttachmentRef,
     EmailMessage,
-    EmailQuery,
     EmailRef,
     truncate_text_bytes,
 )
+from app.integrations.gmail_common.query import build_search_query, redact_quoted_phrases
+from app.integrations.gmail_common.text import html_to_text
 
-_BLOCK_TAGS = {
-    "p",
-    "div",
-    "br",
-    "li",
-    "tr",
-    "h1",
-    "h2",
-    "h3",
-    "h4",
-    "h5",
-    "h6",
-    "table",
-    "thead",
-    "tbody",
-    "blockquote",
-    "pre",
-    "hr",
-    "section",
-    "article",
-    "header",
-    "footer",
-    "ul",
-    "ol",
-    "dl",
-    "dt",
-    "dd",
-}
-_SKIP_TAGS = {"script", "style", "head"}
-_QUOTED_PHRASE = re.compile(r'"[^"]*"')
+__all__ = [
+    "build_search_query",
+    "html_to_text",
+    "message_to_email",
+    "normalize_sender",
+    "redact_quoted_phrases",
+    "thread_to_refs",
+]
 
 
 def normalize_sender(raw: str) -> str:
     _name, address = parseaddr(raw)
     return (address or raw).strip().lower()
-
-
-def redact_quoted_phrases(query: str) -> str:
-    return _QUOTED_PHRASE.sub('"<redacted>"', query)
-
-
-def _gmail_date(value: date) -> str:
-    return value.strftime("%Y/%m/%d")
-
-
-def _from_clause(pattern: str) -> str | None:
-    token = pattern.strip().lower()
-    if not token or token == "*":
-        return None
-    if "*" not in token:
-        return f"from:{token}"
-    if token.startswith("*@*."):
-        domain = token[4:]
-        if domain and "*" not in domain:
-            return f"from:{domain}"
-        return None
-    if token.startswith("*@"):
-        domain = token[2:]
-        if domain and "*" not in domain:
-            return f"from:{domain}"
-        return None
-    return None
-
-
-def build_search_query(query: EmailQuery) -> str:
-    parts: list[str] = []
-    senders = [item.strip().lower() for item in query.senders if item.strip()]
-    if senders != ["*"]:
-        clauses = [clause for sender in senders if (clause := _from_clause(sender))]
-        if len(clauses) == 1:
-            parts.append(clauses[0])
-        elif len(clauses) >= 2:
-            parts.append("{" + " ".join(clauses) + "}")
-    parts.append(f"after:{_gmail_date(query.date_from - timedelta(days=1))}")
-    parts.append(f"before:{_gmail_date(query.date_to + timedelta(days=1))}")
-    hints = [hint.strip() for hint in query.text_hints if hint.strip()]
-    if hints:
-        quoted = [f'"{hint}"' for hint in hints]
-        if len(quoted) == 1:
-            parts.append(quoted[0])
-        else:
-            parts.append("{" + " ".join(quoted) + "}")
-    parts.append("-in:draft")
-    return " ".join(parts)
 
 
 def _parse_message_date(raw: object) -> date | None:
@@ -141,44 +68,6 @@ def thread_to_refs(thread: dict, window: tuple[date, date]) -> list[EmailRef]:
             )
         )
     return refs
-
-
-class _HTMLTextExtractor(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self._chunks: list[str] = []
-        self._skip = 0
-
-    def handle_starttag(self, tag: str, attrs) -> None:
-        if tag in _SKIP_TAGS:
-            self._skip += 1
-            return
-        if tag in _BLOCK_TAGS:
-            self._chunks.append("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in _SKIP_TAGS and self._skip:
-            self._skip -= 1
-            return
-        if self._skip:
-            return
-        if tag in _BLOCK_TAGS and tag != "br":
-            self._chunks.append("\n")
-
-    def handle_data(self, data: str) -> None:
-        if not self._skip:
-            self._chunks.append(data)
-
-
-def html_to_text(html_str: str) -> str:
-    parser = _HTMLTextExtractor()
-    parser.feed(html_str)
-    parser.close()
-    text = html.unescape("".join(parser._chunks))
-    text = re.sub(r"[ \t\r\f\v]+", " ", text)
-    text = re.sub(r" *\n *", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
 
 
 def message_to_email(msg: dict, ref: EmailRef, byte_cap: int) -> EmailMessage:

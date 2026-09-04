@@ -134,6 +134,8 @@ def _requested_sender_might_match_allowlist(requested: str, allowlist: list[str]
 
 
 class EmailSource(ABC):
+    provider_name: str = "unknown"
+
     @abstractmethod
     def search(self, query: EmailQuery) -> list[EmailRef]:
         raise NotImplementedError
@@ -209,6 +211,7 @@ class FixtureEmailSource(AllowlistedEmailSource):
         super().__init__(allowlist)
         self._messages = {message.ref.message_id: message for message in messages}
         self._provider = provider
+        self.provider_name = provider
         self.provider = provider
         self._byte_cap = byte_cap
 
