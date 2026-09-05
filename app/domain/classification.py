@@ -8,9 +8,11 @@ Design note: ONE generic lookup mechanism (NormalizationLookup) backs all
 three, keyed by `kind`. This avoids three parallel mapping systems that
 would each need their own resolution/precedence logic.
 """
+import re
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Sequence
 from enum import Enum
-from typing import Optional
+from typing import Optional, TypeVar
 
 
 class TransactionType(str, Enum):
@@ -78,16 +80,53 @@ def allows_merchant_scope(kind: NormalizationKind | str) -> bool:
     )
 
 
-def allows_raw_prefix(kind: NormalizationKind | str) -> bool:
-    value = kind.value if isinstance(kind, NormalizationKind) else kind
-    return value == NormalizationKind.MERCHANT.value
+def has_wildcard(pattern: str) -> bool:
+    return "%" in pattern
 
 
-def space_bounded_prefix_match(value: str | None, prefix: str) -> bool:
-    """Exact match, or ``value`` starts with ``prefix`` plus a space."""
+def pattern_matches(value: str | None, pattern: str) -> bool:
+    """Match ``value`` against a stored pattern. No ``%`` means exact equality."""
     if value is None:
         return False
-    return value == prefix or value.startswith(prefix + " ")
+    if not has_wildcard(pattern):
+        return value == pattern
+    parts = pattern.split("%")
+    regex = "^" + ".*".join(re.escape(part) for part in parts) + "$"
+    return re.match(regex, value) is not None
+
+
+def pattern_rank_key(pattern: str) -> tuple[int, int, int]:
+    """Lower is more specific: exact beats wildcard; longer literal wins."""
+    literal_len = len(pattern.replace("%", ""))
+    wildcard = 1 if has_wildcard(pattern) else 0
+    return (wildcard, -literal_len, -len(pattern))
+
+
+def validate_mapping_pattern(pattern: str) -> str | None:
+    """Return an error message when ``pattern`` must be rejected at write time."""
+    if not pattern.strip():
+        return "pattern is empty"
+    if pattern.replace("%", "").strip() == "":
+        return "pattern cannot be only wildcards"
+    return None
+
+
+T = TypeVar("T")
+
+
+def pick_best_pattern_match(
+    candidates: Sequence[T],
+    value: str,
+    pattern_getter: Callable[[T], str],
+) -> T | None:
+    matches = [
+        candidate
+        for candidate in candidates
+        if pattern_matches(value, pattern_getter(candidate))
+    ]
+    if not matches:
+        return None
+    return min(matches, key=lambda candidate: pattern_rank_key(pattern_getter(candidate)))
 
 
 def merchant_scope_matches(
@@ -95,20 +134,9 @@ def merchant_scope_matches(
     rule_merchant: str,
     kind: NormalizationKind | str,
 ) -> bool:
-    """Exact cleaned match, or type-only space-bounded prefix.
-
-    Type prefix lets merchant=western union hit
-    ``western union capture 623… web id: …`` ACH labels without a
-    per-row merchant alias.
-    """
-    if resolved_cleaned is None:
-        return False
-    if resolved_cleaned == rule_merchant:
-        return True
-    value = kind.value if isinstance(kind, NormalizationKind) else kind
-    if value != NormalizationKind.TRANSACTION_TYPE.value:
-        return False
-    return space_bounded_prefix_match(resolved_cleaned, rule_merchant)
+    """Match resolved merchant against a rule's merchant pattern (may include ``%``)."""
+    del kind  # kept for call-site compatibility; all scoped kinds use the same matcher
+    return pattern_matches(resolved_cleaned, rule_merchant)
 
 
 def clean_raw_value(raw_value: str) -> str:

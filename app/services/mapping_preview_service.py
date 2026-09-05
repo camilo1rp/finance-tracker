@@ -16,13 +16,13 @@ from app.domain.classification import (
     NormalizationKind,
     TransactionType,
     allows_merchant_scope,
-    allows_raw_prefix,
     classify_category,
     classify_merchant,
     classify_owner,
     clean_raw_value,
     merchant_scope_matches,
-    space_bounded_prefix_match,
+    pattern_matches,
+    validate_mapping_pattern,
 )
 from app.domain.transaction_type_resolver import resolve_transaction_type
 from app.domain.merged_lookup import MergedNormalizationLookup, RuleMatch, RuleSpec
@@ -173,6 +173,15 @@ def validate_create_op(db: Session, op: CreateMappingOp, index: int) -> str | No
             )
     if not str(op.raw_value).strip():
         return f"op {index}: raw_value is empty"
+    cleaned_raw = clean_raw_value(op.raw_value)
+    pattern_error = validate_mapping_pattern(cleaned_raw)
+    if pattern_error is not None:
+        return f"op {index}: {pattern_error}"
+    if op.merchant is not None and op.merchant.strip():
+        cleaned_merchant = clean_raw_value(op.merchant)
+        merchant_pattern_error = validate_mapping_pattern(cleaned_merchant)
+        if merchant_pattern_error is not None:
+            return f"op {index}: merchant {merchant_pattern_error}"
     if op.account_id is not None and db.get(Account, op.account_id) is None:
         return f"op {index}: account {op.account_id} not found"
     return None
@@ -436,12 +445,8 @@ def _rule_in_scope(
     if raw is None or not str(raw).strip():
         return False
     cleaned_raw = clean_raw_value(str(raw))
-    if cleaned_raw != spec.raw_value:
-        if not (
-            allows_raw_prefix(spec.kind)
-            and space_bounded_prefix_match(cleaned_raw, spec.raw_value)
-        ):
-            return False
+    if not pattern_matches(cleaned_raw, spec.raw_value):
+        return False
     if spec.account_id is not None and txn.account_id != spec.account_id:
         return False
     if spec.merchant is not None and allows_merchant_scope(spec.kind):

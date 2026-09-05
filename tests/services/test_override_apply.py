@@ -145,7 +145,10 @@ def test_override_survives_reclassify_and_analytics_use_effective_category(db_se
     db_session.expire_all()
     assert db_session.get(Transaction, txn.id).category_override == "Dining"
     rows = summarize(db_session, None, None, None, None, "category")
-    assert rows == [{"group_value": "Dining", "total": Decimal("10.00"), "count": 1}]
+    assert len(rows) == 1
+    assert rows[0]["group_value"] == "Dining"
+    assert rows[0]["total"] == Decimal("10.00")
+    assert rows[0]["count"] == 1
 
 
 def test_override_survives_reclassify_transactions_endpoint_path(db_session: Session) -> None:
@@ -200,7 +203,10 @@ def test_override_survives_subsequent_merchant_rule_change(db_session: Session) 
     assert stored.category_override == "Dining"
     assert stored.category_normalized == "Household"
     rows = summarize(db_session, None, None, None, None, "category")
-    assert rows == [{"group_value": "Dining", "total": Decimal("10.00"), "count": 1}]
+    assert len(rows) == 1
+    assert rows[0]["group_value"] == "Dining"
+    assert rows[0]["total"] == Decimal("10.00")
+    assert rows[0]["count"] == 1
 
 
 def test_missing_transaction_is_validation_error(db_session: Session) -> None:

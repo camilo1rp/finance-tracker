@@ -8,6 +8,7 @@ from app.domain.classification import (
     TransactionType,
     allows_merchant_scope,
     clean_raw_value,
+    validate_mapping_pattern,
 )
 from app.models import Account, NormalizationMapping
 from app.schemas import (
@@ -105,6 +106,19 @@ def create_mapping(
         )
 
     cleaned = clean_raw_value(payload.raw_value)
+    pattern_error = validate_mapping_pattern(cleaned)
+    if pattern_error is not None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=pattern_error,
+        )
+    if cleaned_merchant is not None:
+        merchant_pattern_error = validate_mapping_pattern(cleaned_merchant)
+        if merchant_pattern_error is not None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"merchant {merchant_pattern_error}",
+            )
     existing_q = select(NormalizationMapping).where(
         NormalizationMapping.kind == kind.value,
         NormalizationMapping.raw_value == cleaned,

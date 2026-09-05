@@ -286,7 +286,7 @@ def test_normalize_type_uses_resolved_merchant() -> None:
     lookup = InMemoryNormalizationLookup(
         account_rules={(1, NormalizationKind.TRANSACTION_TYPE, "misc_debit"): "SPEND"},
         account_merchant_rules={
-            (1, NormalizationKind.TRANSACTION_TYPE, "misc_debit", "western union"): (
+            (1, NormalizationKind.TRANSACTION_TYPE, "misc_debit", "western union%"): (
                 "TRANSFER"
             ),
         },

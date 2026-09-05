@@ -6,8 +6,12 @@ from app.domain.classification import (
     classify_owner,
     classify_transaction_type,
     clean_raw_value,
+    has_wildcard,
     merchant_scope_matches,
-    space_bounded_prefix_match,
+    pattern_matches,
+    pattern_rank_key,
+    pick_best_pattern_match,
+    validate_mapping_pattern,
 )
 from tests.fakes import InMemoryNormalizationLookup
 
@@ -15,6 +19,38 @@ from tests.fakes import InMemoryNormalizationLookup
 def test_clean_raw_value_trims_and_lowercases() -> None:
     assert clean_raw_value(" Sale ") == "sale"
     assert clean_raw_value("FOOD & DRINK") == "food & drink"
+    assert clean_raw_value("%STARBUCKS%") == "%starbucks%"
+
+
+def test_pattern_matches_exact_and_wildcards() -> None:
+    assert pattern_matches("starbucks", "starbucks")
+    assert not pattern_matches("starbucks #59", "starbucks")
+    assert pattern_matches("starbucks #59", "starbucks%")
+    assert pattern_matches("sq *starbucks", "%starbucks")
+    assert pattern_matches("sq *starbucks store", "%starbucks%")
+    assert pattern_matches("west union", "west%union")
+    assert pattern_matches("western union", "west%union")
+    assert pattern_matches("50_off", "50_off")  # underscore is literal
+    assert not pattern_matches("starbucks", "%only%")
+
+
+def test_pattern_rank_key_prefers_exact_and_longer_literals() -> None:
+    assert pattern_rank_key("starbucks") < pattern_rank_key("%starbucks%")
+    assert pattern_rank_key("starbucks%") < pattern_rank_key("%bucks%")
+
+
+def test_validate_mapping_pattern_rejects_only_wildcards() -> None:
+    assert validate_mapping_pattern("%%") == "pattern cannot be only wildcards"
+    assert validate_mapping_pattern("%") == "pattern cannot be only wildcards"
+    assert validate_mapping_pattern("starbucks%") is None
+
+
+def test_pick_best_pattern_match() -> None:
+    rules = ["%bucks%", "starbucks%", "starbucks"]
+    best = pick_best_pattern_match(rules, "starbucks", lambda item: item)
+    assert best == "starbucks"
+    prefix_best = pick_best_pattern_match(rules, "starbucks #59", lambda item: item)
+    assert prefix_best == "starbucks%"
 
 
 def test_classify_transaction_type_uses_cleaned_raw_value() -> None:
@@ -52,41 +88,32 @@ def test_classify_category_and_owner_passthrough_none() -> None:
     assert classify_owner("Jane", lookup, account_id=1) is None
 
 
-def test_space_bounded_prefix_match() -> None:
-    assert space_bounded_prefix_match("western union", "western union")
-    assert space_bounded_prefix_match(
-        "western union capture 623 web id: 9", "western union"
-    )
-    assert not space_bounded_prefix_match("west", "western union")
-    assert not space_bounded_prefix_match("westernunion", "western union")
-
-
-def test_merchant_scope_matches_type_prefix_only() -> None:
+def test_merchant_scope_matches_wildcards() -> None:
     assert merchant_scope_matches("western union", "western union", "transaction_type")
     assert merchant_scope_matches(
         "western union capture 623 web id: 9",
-        "western union",
+        "western union%",
         "transaction_type",
     )
-    assert not merchant_scope_matches(
-        "west",
-        "western union",
-        "transaction_type",
-    )
-    assert not merchant_scope_matches(
+    assert merchant_scope_matches(
         "western union capture 623 web id: 9",
-        "western union",
+        "%western union%",
         "category",
     )
+    assert not merchant_scope_matches("west", "western union%", "transaction_type")
+    assert not has_wildcard("western union")
 
 
 def test_classify_transaction_type_uses_merchant_scope() -> None:
     lookup = InMemoryNormalizationLookup(
         account_rules={(1, NormalizationKind.TRANSACTION_TYPE, "misc_debit"): "SPEND"},
         account_merchant_rules={
-            (1, NormalizationKind.TRANSACTION_TYPE, "misc_debit", "western union"): (
-                "TRANSFER"
-            ),
+            (
+                1,
+                NormalizationKind.TRANSACTION_TYPE,
+                "misc_debit",
+                "western union%",
+            ): "TRANSFER",
         },
     )
     assert (
@@ -148,12 +175,12 @@ def test_classify_merchant_maps_or_passthrough_none() -> None:
     assert classify_merchant("  ", lookup, account_id=1) is None
 
 
-def test_classify_merchant_uses_raw_value_prefix() -> None:
+def test_classify_merchant_uses_raw_value_wildcard() -> None:
     lookup = InMemoryNormalizationLookup(
         account_rules={
-            (3, NormalizationKind.MERCHANT, "western union"): "Western Union",
+            (3, NormalizationKind.MERCHANT, "western union%"): "Western Union",
         },
-        global_rules={(NormalizationKind.MERCHANT, "marshalls"): "Marshalls"},
+        global_rules={(NormalizationKind.MERCHANT, "marshalls%"): "Marshalls"},
     )
     assert (
         classify_merchant(

@@ -56,6 +56,32 @@ def test_create_mapping_cleans_raw_value_and_collapses_duplicates(client: TestCl
     assert duplicate.status_code == 409
 
 
+def test_create_mapping_rejects_wildcard_only_pattern(client: TestClient) -> None:
+    rejected = client.post(
+        "/mappings",
+        json={
+            "kind": "merchant",
+            "raw_value": "%%",
+            "canonical_value": "Anything",
+        },
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"] == "pattern cannot be only wildcards"
+
+
+def test_create_mapping_stores_wildcard_pattern_cleaned(client: TestClient) -> None:
+    created = client.post(
+        "/mappings",
+        json={
+            "kind": "merchant",
+            "raw_value": "%STARBUCKS%",
+            "canonical_value": "Starbucks",
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["raw_value"] == "%starbucks%"
+
+
 def test_list_and_delete_mapping(client: TestClient) -> None:
     created = client.post(
         "/mappings",
@@ -193,11 +219,11 @@ def test_transaction_type_mapping_merchant_scope(
             "raw_value": "MISC_DEBIT",
             "canonical_value": "TRANSFER",
             "account_id": account_id,
-            "merchant": " Western Union ",
+            "merchant": " Western Union% ",
         },
     )
     assert scoped.status_code == 201, scoped.text
-    assert scoped.json()["merchant"] == "western union"
+    assert scoped.json()["merchant"] == "western union%"
 
     unscoped = client.post(
         "/mappings",
@@ -240,7 +266,7 @@ def test_transaction_type_mapping_merchant_scope(
     )
 
 
-def test_merchant_mapping_raw_value_prefix(
+def test_merchant_mapping_raw_value_wildcard(
     client: TestClient, db_session: Session
 ) -> None:
     account_id = _account(client)
@@ -248,13 +274,13 @@ def test_merchant_mapping_raw_value_prefix(
         "/mappings",
         json={
             "kind": "merchant",
-            "raw_value": "Western Union",
+            "raw_value": "Western Union%",
             "canonical_value": "Western Union",
             "account_id": account_id,
         },
     )
     assert created.status_code == 201, created.text
-    assert created.json()["raw_value"] == "western union"
+    assert created.json()["raw_value"] == "western union%"
 
     lookup = DbNormalizationLookup(db_session)
     assert (

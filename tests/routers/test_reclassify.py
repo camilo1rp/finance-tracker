@@ -274,7 +274,7 @@ def test_reclassify_type_uses_merchant_scope(
             "raw_value": "MISC_DEBIT",
             "canonical_value": "TRANSFER",
             "account_id": account["id"],
-            "merchant": "Western Union",
+            "merchant": "Western Union%",
         },
     )
     assert created.status_code == 201, created.text

@@ -1,10 +1,13 @@
+from dataclasses import dataclass
+
 from app.domain.classification import (
     NormalizationKind,
     NormalizationLookup,
     allows_merchant_scope,
-    allows_raw_prefix,
     merchant_scope_matches,
-    space_bounded_prefix_match,
+    pattern_matches,
+    pattern_rank_key,
+    pick_best_pattern_match,
 )
 from app.domain.email_source import (
     AllowlistedEmailSource,
@@ -21,13 +24,21 @@ from app.domain.receipts import ReceiptExtraction, ReceiptExtractor
 from app.integrations.gmail_mcp.transport import ALLOWED_TOOLS, McpTransport
 
 
+@dataclass(frozen=True)
+class _FakeRule:
+    kind: NormalizationKind
+    raw_value: str
+    canonical_value: str
+    account_id: int | None
+    merchant: str | None
+
+
 class InMemoryNormalizationLookup(NormalizationLookup):
-    """Account-specific rules beat global ones. Keys are already-cleaned values.
+    """Account-specific rules beat global ones. Keys/patterns are already cleaned.
 
     Merchant-scoped category and transaction_type rules (cleaned merchant
-    as the last key part) beat the matching unscoped rule at the same
-    account/global level. Type rules also accept a space-bounded prefix.
-    Merchant-kind raw_value also accepts a space-bounded prefix.
+    pattern as the last field) beat the matching unscoped rule at the same
+    account/global level. Patterns may include ``%`` wildcards.
     """
 
     def __init__(
@@ -39,10 +50,29 @@ class InMemoryNormalizationLookup(NormalizationLookup):
         account_merchant_rules: dict[tuple[int, NormalizationKind, str, str], str]
         | None = None,
     ) -> None:
-        self.global_rules = global_rules or {}
-        self.account_rules = account_rules or {}
-        self.global_merchant_rules = global_merchant_rules or {}
-        self.account_merchant_rules = account_merchant_rules or {}
+        self._rules: list[_FakeRule] = []
+        for (kind, raw_value), canonical in (global_rules or {}).items():
+            self._rules.append(
+                _FakeRule(kind, raw_value, canonical, None, None)
+            )
+        for (account_id, kind, raw_value), canonical in (
+            account_rules or {}
+        ).items():
+            self._rules.append(
+                _FakeRule(kind, raw_value, canonical, account_id, None)
+            )
+        for (kind, raw_value, merchant), canonical in (
+            global_merchant_rules or {}
+        ).items():
+            self._rules.append(
+                _FakeRule(kind, raw_value, canonical, None, merchant)
+            )
+        for (account_id, kind, raw_value, merchant), canonical in (
+            account_merchant_rules or {}
+        ).items():
+            self._rules.append(
+                _FakeRule(kind, raw_value, canonical, account_id, merchant)
+            )
 
     def resolve(
         self,
@@ -52,113 +82,73 @@ class InMemoryNormalizationLookup(NormalizationLookup):
         merchant: str | None = None,
     ) -> str | None:
         if allows_merchant_scope(kind) and merchant is not None:
-            hit = self.account_merchant_rules.get(
-                (account_id, kind, raw_value, merchant)
-            )
+            hit = self._best_merchant_scoped(kind, raw_value, account_id, merchant)
             if hit is not None:
-                return hit
-            prefix = self._longest_prefix(
-                self.account_merchant_rules, account_id, kind, raw_value, merchant
-            )
-            if prefix is not None:
-                return prefix
-        account_hit = self.account_rules.get((account_id, kind, raw_value))
-        if account_hit is not None:
-            return account_hit
-        if allows_raw_prefix(kind):
-            prefix = self._longest_raw_prefix(
-                self.account_rules, account_id, kind, raw_value
-            )
-            if prefix is not None:
-                return prefix
+                return hit.canonical_value
+        hit = self._best_unscoped(kind, raw_value, account_id)
+        if hit is not None:
+            return hit.canonical_value
         if allows_merchant_scope(kind) and merchant is not None:
-            hit = self.global_merchant_rules.get((kind, raw_value, merchant))
+            hit = self._best_merchant_scoped(kind, raw_value, None, merchant)
             if hit is not None:
-                return hit
-            prefix = self._longest_prefix_global(
-                self.global_merchant_rules, kind, raw_value, merchant
-            )
-            if prefix is not None:
-                return prefix
-        exact_global = self.global_rules.get((kind, raw_value))
-        if exact_global is not None:
-            return exact_global
-        if allows_raw_prefix(kind):
-            return self._longest_raw_prefix_global(
-                self.global_rules, kind, raw_value
-            )
+                return hit.canonical_value
+        hit = self._best_unscoped(kind, raw_value, None)
+        if hit is not None:
+            return hit.canonical_value
         return None
 
-    def _longest_prefix(
+    def _rules_at_scope(
         self,
-        rules: dict[tuple[int, NormalizationKind, str, str], str],
-        account_id: int,
         kind: NormalizationKind,
-        raw_value: str,
-        merchant: str,
-    ) -> str | None:
-        matches = [
-            (key[3], value)
-            for key, value in rules.items()
-            if key[0] == account_id
-            and key[1] is kind
-            and key[2] == raw_value
-            and merchant_scope_matches(merchant, key[3], kind)
+        account_id: int | None,
+        *,
+        merchant_scoped: bool,
+    ) -> list[_FakeRule]:
+        return [
+            rule
+            for rule in self._rules
+            if rule.kind is kind
+            and rule.account_id == account_id
+            and (
+                (rule.merchant is not None)
+                if merchant_scoped
+                else rule.merchant is None
+            )
         ]
-        if not matches:
-            return None
-        return max(matches, key=lambda item: len(item[0]))[1]
 
-    def _longest_prefix_global(
+    def _best_unscoped(
         self,
-        rules: dict[tuple[NormalizationKind, str, str], str],
         kind: NormalizationKind,
         raw_value: str,
-        merchant: str,
-    ) -> str | None:
-        matches = [
-            (key[2], value)
-            for key, value in rules.items()
-            if key[0] is kind
-            and key[1] == raw_value
-            and merchant_scope_matches(merchant, key[2], kind)
-        ]
-        if not matches:
-            return None
-        return max(matches, key=lambda item: len(item[0]))[1]
+        account_id: int | None,
+    ) -> _FakeRule | None:
+        rules = self._rules_at_scope(kind, account_id, merchant_scoped=False)
+        return pick_best_pattern_match(rules, raw_value, lambda rule: rule.raw_value)
 
-    def _longest_raw_prefix(
+    def _best_merchant_scoped(
         self,
-        rules: dict[tuple[int, NormalizationKind, str], str],
-        account_id: int,
         kind: NormalizationKind,
         raw_value: str,
-    ) -> str | None:
+        account_id: int | None,
+        row_merchant: str,
+    ) -> _FakeRule | None:
+        rules = self._rules_at_scope(kind, account_id, merchant_scoped=True)
         matches = [
-            (key[2], value)
-            for key, value in rules.items()
-            if key[0] == account_id
-            and key[1] is kind
-            and space_bounded_prefix_match(raw_value, key[2])
+            rule
+            for rule in rules
+            if pattern_matches(raw_value, rule.raw_value)
+            and rule.merchant is not None
+            and merchant_scope_matches(row_merchant, rule.merchant, kind)
         ]
         if not matches:
             return None
-        return max(matches, key=lambda item: len(item[0]))[1]
-
-    def _longest_raw_prefix_global(
-        self,
-        rules: dict[tuple[NormalizationKind, str], str],
-        kind: NormalizationKind,
-        raw_value: str,
-    ) -> str | None:
-        matches = [
-            (key[1], value)
-            for key, value in rules.items()
-            if key[0] is kind and space_bounded_prefix_match(raw_value, key[1])
-        ]
-        if not matches:
-            return None
-        return max(matches, key=lambda item: len(item[0]))[1]
+        return min(
+            matches,
+            key=lambda rule: (
+                pattern_rank_key(rule.raw_value),
+                pattern_rank_key(rule.merchant or ""),
+            ),
+        )
 
 
 class FakeEmailSource(AllowlistedEmailSource):

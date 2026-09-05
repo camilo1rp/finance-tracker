@@ -565,7 +565,7 @@ def test_preview_type_merchant_scope_only_hits_matching_merchant(
                 raw_value="MISC_DEBIT",
                 canonical_value="TRANSFER",
                 account_id=account.id,
-                merchant="Western Union",
+                merchant="Western Union%",
             ),
             account_id=account.id,
         ),
@@ -576,7 +576,7 @@ def test_preview_type_merchant_scope_only_hits_matching_merchant(
     assert preview.ops[0].samples[0].new_effective == "TRANSFER"
 
 
-def test_preview_merchant_raw_prefix_covers_variants(db_session: Session) -> None:
+def test_preview_merchant_wildcard_covers_variants(db_session: Session) -> None:
     _, account = _seed_account(db_session)
     _add_txn(
         db_session,
@@ -604,7 +604,7 @@ def test_preview_merchant_raw_prefix_covers_variants(db_session: Session) -> Non
         _plan(
             _create(
                 kind="merchant",
-                raw_value="Western Union",
+                raw_value="Western Union%",
                 canonical_value="Western Union",
                 account_id=account.id,
             ),

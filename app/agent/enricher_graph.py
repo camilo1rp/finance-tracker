@@ -24,7 +24,7 @@ Prefer existing categories. When you propose a new category, say so in the narra
 
 Put anything uncertain in unresolved with a reason (below_threshold, no_evidence, unknown_transaction, evidence_mismatch, source_unavailable, ambiguous) rather than guessing.
 
-When evidence shows a merchant is always one category, add a merchant_rule_suggestions create op instead of many per-transaction overrides.
+When evidence shows a merchant is always one category, add a merchant_rule_suggestions create op instead of many per-transaction overrides. Use `%` wildcards in raw_value when payee strings vary (e.g. `amazon%` or `%amazon%`); no `%` is exact match.
 
 Finish by calling submit_recommendation exactly once.
 

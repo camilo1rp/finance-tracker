@@ -123,7 +123,7 @@ def test_transaction_type_precedence_account_merchant_to_global() -> None:
         [
             RuleSpec("transaction_type", "misc_debit", "SPEND", None, None, "db:1"),
             RuleSpec(
-                "transaction_type", "misc_debit", "FEE", None, "western union", "db:2"
+                "transaction_type", "misc_debit", "FEE", None, "western union%", "db:2"
             ),
             RuleSpec("transaction_type", "misc_debit", "SPEND", 1, None, "db:3"),
             RuleSpec(
@@ -131,7 +131,7 @@ def test_transaction_type_precedence_account_merchant_to_global() -> None:
                 "misc_debit",
                 "TRANSFER",
                 1,
-                "western union",
+                "western union%",
                 "db:4",
             ),
         ]
@@ -152,15 +152,15 @@ def test_transaction_type_precedence_account_merchant_to_global() -> None:
     assert lookup.resolve_with_ref(TYPE, "misc_debit", 1, "western union").ref == "db:4"
 
 
-def test_merchant_kind_raw_value_prefix() -> None:
+def test_merchant_kind_raw_value_wildcard() -> None:
     lookup = MergedNormalizationLookup(
         [
             RuleSpec(
-                "merchant", "western union", "Western Union", 3, None, "db:1"
+                "merchant", "western union%", "Western Union", 3, None, "db:1"
             ),
-            RuleSpec("merchant", "marshalls", "Marshalls", None, None, "db:2"),
+            RuleSpec("merchant", "marshalls%", "Marshalls", None, None, "db:2"),
             RuleSpec(
-                "merchant", "marshalls #59", "Marshalls 59", None, None, "db:3"
+                "merchant", "marshalls #59%", "Marshalls 59", None, None, "db:3"
             ),
         ]
     )
