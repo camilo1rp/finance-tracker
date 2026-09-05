@@ -8,7 +8,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import ColumnElement
 
@@ -486,9 +486,24 @@ def unmapped_summary(db: Session) -> dict[str, list[str]]:
         .distinct()
         .order_by(Transaction.merchant_raw)
     ).all()
+    merchants_without_category = db.scalars(
+        select(effective_merchant)
+        .where(
+            Transaction.category_override.is_(None),
+            Transaction.category_normalized.is_(None),
+            or_(
+                Transaction.category_raw.is_(None),
+                func.trim(Transaction.category_raw) == "",
+            ),
+            effective_merchant.isnot(None),
+        )
+        .distinct()
+        .order_by(effective_merchant)
+    ).all()
     return {
         "transaction_types": list(types),
         "categories": list(categories),
         "owners": list(owners),
         "merchants": list(merchants),
+        "merchants_without_category": list(merchants_without_category),
     }

@@ -520,7 +520,7 @@ def test_preview_validation_excludes_invalid_and_continues(db_session: Session) 
         ),
     )
     assert preview.validation_errors == [
-        "op 1: merchant only valid for category or transaction_type",
+        "op 1: merchant scope is only allowed on category or transaction_type mappings",
         "op 3: canonical_value must be a TransactionType",
     ]
     assert len(preview.ops) == 1
@@ -617,3 +617,40 @@ def test_preview_merchant_wildcard_covers_variants(db_session: Session) -> None:
         "wu-a",
         "wu-b",
     }
+
+
+def test_preview_empty_category_merchant_rule(db_session: Session) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "irs-payment",
+        category_raw=None,
+        category_normalized=None,
+        merchant_raw="IRS USATAXPYMT",
+        merchant_normalized="IRS",
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "has-category",
+        category_raw="Other",
+        category_normalized=None,
+        merchant_raw="IRS USATAXPYMT",
+        merchant_normalized="IRS",
+    )
+    preview = preview_mappings(
+        db_session,
+        _plan(
+            _create(
+                kind="category",
+                canonical_value="taxes",
+                merchant="irs%",
+                account_id=account.id,
+            ),
+            account_id=account.id,
+        ),
+    )
+    assert preview.validation_errors == []
+    assert preview.ops[0].would_change == 1
+    assert preview.ops[0].samples[0].description == "irs-payment"

@@ -45,6 +45,7 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_merchant_columns(engine)
     _ensure_mapping_merchant_scope(engine)
+    _ensure_mapping_nullable_raw_value(engine)
     _ensure_transaction_type_columns(engine)
     _backfill_account_kind(engine)
     _migrate_payment_mapping_canonicals(engine)
@@ -113,6 +114,27 @@ def _ensure_mapping_merchant_scope(engine: Engine) -> None:
                 "ADD CONSTRAINT uq_normalization_rule "
                 "UNIQUE (kind, raw_value, account_id, merchant)"
             )
+        )
+
+
+def _ensure_mapping_nullable_raw_value(engine: Engine) -> None:
+    """Allow null raw_value for merchant-keyed category rules on live Postgres."""
+    from sqlalchemy import inspect
+
+    if engine.dialect.name != "postgresql":
+        return
+    inspector = inspect(engine)
+    if "normalization_mappings" not in inspector.get_table_names():
+        return
+    columns = {
+        column["name"]: column for column in inspector.get_columns("normalization_mappings")
+    }
+    raw = columns.get("raw_value")
+    if raw is None or raw.get("nullable"):
+        return
+    with engine.begin() as connection:
+        connection.execute(
+            text("ALTER TABLE normalization_mappings ALTER COLUMN raw_value DROP NOT NULL")
         )
 
 

@@ -52,6 +52,7 @@ class UnmappedValues:
     categories: list[str] = field(default_factory=list)
     owners: list[str] = field(default_factory=list)
     merchants: list[str] = field(default_factory=list)
+    merchants_without_category: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

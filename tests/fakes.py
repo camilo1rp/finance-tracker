@@ -27,7 +27,7 @@ from app.integrations.gmail_mcp.transport import ALLOWED_TOOLS, McpTransport
 @dataclass(frozen=True)
 class _FakeRule:
     kind: NormalizationKind
-    raw_value: str
+    raw_value: str | None
     canonical_value: str
     account_id: int | None
     merchant: str | None
@@ -45,9 +45,9 @@ class InMemoryNormalizationLookup(NormalizationLookup):
         self,
         global_rules: dict[tuple[NormalizationKind, str], str] | None = None,
         account_rules: dict[tuple[int, NormalizationKind, str], str] | None = None,
-        global_merchant_rules: dict[tuple[NormalizationKind, str, str], str]
+        global_merchant_rules: dict[tuple[NormalizationKind, str | None, str], str]
         | None = None,
-        account_merchant_rules: dict[tuple[int, NormalizationKind, str, str], str]
+        account_merchant_rules: dict[tuple[int, NormalizationKind, str | None, str], str]
         | None = None,
     ) -> None:
         self._rules: list[_FakeRule] = []
@@ -97,6 +97,15 @@ class InMemoryNormalizationLookup(NormalizationLookup):
             return hit.canonical_value
         return None
 
+    def resolve_empty_category(self, account_id: int, merchant: str) -> str | None:
+        hit = self._best_empty_category_merchant(account_id, merchant)
+        if hit is not None:
+            return hit.canonical_value
+        hit = self._best_empty_category_merchant(None, merchant)
+        if hit is not None:
+            return hit.canonical_value
+        return None
+
     def _rules_at_scope(
         self,
         kind: NormalizationKind,
@@ -122,7 +131,11 @@ class InMemoryNormalizationLookup(NormalizationLookup):
         raw_value: str,
         account_id: int | None,
     ) -> _FakeRule | None:
-        rules = self._rules_at_scope(kind, account_id, merchant_scoped=False)
+        rules = [
+            rule
+            for rule in self._rules_at_scope(kind, account_id, merchant_scoped=False)
+            if rule.raw_value is not None
+        ]
         return pick_best_pattern_match(rules, raw_value, lambda rule: rule.raw_value)
 
     def _best_merchant_scoped(
@@ -136,7 +149,8 @@ class InMemoryNormalizationLookup(NormalizationLookup):
         matches = [
             rule
             for rule in rules
-            if pattern_matches(raw_value, rule.raw_value)
+            if rule.raw_value is not None
+            and pattern_matches(raw_value, rule.raw_value)
             and rule.merchant is not None
             and merchant_scope_matches(row_merchant, rule.merchant, kind)
         ]
@@ -149,6 +163,27 @@ class InMemoryNormalizationLookup(NormalizationLookup):
                 pattern_rank_key(rule.merchant or ""),
             ),
         )
+
+    def _best_empty_category_merchant(
+        self,
+        account_id: int | None,
+        row_merchant: str,
+    ) -> _FakeRule | None:
+        rules = self._rules_at_scope(
+            NormalizationKind.CATEGORY, account_id, merchant_scoped=True
+        )
+        matches = [
+            rule
+            for rule in rules
+            if rule.raw_value is None
+            and rule.merchant is not None
+            and merchant_scope_matches(
+                row_merchant, rule.merchant, NormalizationKind.CATEGORY
+            )
+        ]
+        if not matches:
+            return None
+        return min(matches, key=lambda rule: pattern_rank_key(rule.merchant or ""))
 
 
 class FakeEmailSource(AllowlistedEmailSource):

@@ -61,7 +61,7 @@ def list_accounts() -> str:
 
 @tool
 def get_unmapped_values() -> str:
-    """Distinct raw type/category/owner/merchant values that still need mapping rules."""
+    """Distinct raw type/category/owner/merchant values that still need mapping rules, plus merchants_without_category for rows with no bank category."""
     with tool_session() as db:
         return json.dumps(unmapped_summary(db))
 

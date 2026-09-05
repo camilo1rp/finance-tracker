@@ -21,8 +21,8 @@ from app.domain.classification import (
     classify_owner,
     clean_raw_value,
     merchant_scope_matches,
+    normalize_mapping_create,
     pattern_matches,
-    validate_mapping_pattern,
 )
 from app.domain.transaction_type_resolver import resolve_transaction_type
 from app.domain.merged_lookup import MergedNormalizationLookup, RuleMatch, RuleSpec
@@ -106,14 +106,17 @@ class _OpAcc:
 def find_mapping_by_identity(
     db: Session,
     kind: str,
-    raw_value: str,
+    raw_value: str | None,
     account_id: int | None,
     merchant: str | None,
 ) -> NormalizationMapping | None:
     stmt = select(NormalizationMapping).where(
         NormalizationMapping.kind == kind,
-        NormalizationMapping.raw_value == raw_value,
     )
+    if raw_value is None:
+        stmt = stmt.where(NormalizationMapping.raw_value.is_(None))
+    else:
+        stmt = stmt.where(NormalizationMapping.raw_value == raw_value)
     if account_id is None:
         stmt = stmt.where(NormalizationMapping.account_id.is_(None))
     else:
@@ -132,9 +135,12 @@ def _cleaned_merchant(merchant: str | None) -> str | None:
 
 
 def _create_spec(op: CreateMappingOp, index: int) -> RuleSpec:
+    raw = None
+    if op.raw_value is not None and str(op.raw_value).strip():
+        raw = clean_raw_value(op.raw_value)
     return RuleSpec(
         kind=op.kind,
-        raw_value=clean_raw_value(op.raw_value),
+        raw_value=raw,
         canonical_value=op.canonical_value,
         account_id=op.account_id,
         merchant=_cleaned_merchant(op.merchant),
@@ -166,22 +172,11 @@ def validate_create_op(db: Session, op: CreateMappingOp, index: int) -> str | No
             TransactionType(op.canonical_value)
         except ValueError:
             return f"op {index}: canonical_value must be a TransactionType"
-    if op.merchant is not None and op.merchant.strip():
-        if not allows_merchant_scope(kind):
-            return (
-                f"op {index}: merchant only valid for category or transaction_type"
-            )
-    if not str(op.raw_value).strip():
-        return f"op {index}: raw_value is empty"
-    cleaned_raw = clean_raw_value(op.raw_value)
-    pattern_error = validate_mapping_pattern(cleaned_raw)
-    if pattern_error is not None:
-        return f"op {index}: {pattern_error}"
-    if op.merchant is not None and op.merchant.strip():
-        cleaned_merchant = clean_raw_value(op.merchant)
-        merchant_pattern_error = validate_mapping_pattern(cleaned_merchant)
-        if merchant_pattern_error is not None:
-            return f"op {index}: merchant {merchant_pattern_error}"
+    _, _, mapping_error = normalize_mapping_create(
+        NormalizationKind(op.kind), op.raw_value, op.merchant
+    )
+    if mapping_error is not None:
+        return f"op {index}: {mapping_error}"
     if op.account_id is not None and db.get(Account, op.account_id) is None:
         return f"op {index}: account {op.account_id} not found"
     return None
@@ -431,6 +426,10 @@ def _row_raw(kind: str, txn: Transaction, merchant_raw: str | None) -> str | Non
     return merchant_raw
 
 
+def _category_raw_empty(raw: str | None) -> bool:
+    return raw is None or not str(raw).strip()
+
+
 def _rule_in_scope(
     spec: RuleSpec,
     txn: Transaction,
@@ -441,6 +440,18 @@ def _rule_in_scope(
         return False
     if spec.kind == "owner" and not txn.owner_raw:
         return False
+    if spec.kind == "category" and spec.raw_value is None:
+        if not _category_raw_empty(txn.category_raw):
+            return False
+        if spec.merchant is None or resolved_merchant_cleaned is None:
+            return False
+        if not merchant_scope_matches(
+            resolved_merchant_cleaned, spec.merchant, spec.kind
+        ):
+            return False
+        if spec.account_id is not None and txn.account_id != spec.account_id:
+            return False
+        return True
     raw = _row_raw(spec.kind, txn, merchant_raw)
     if raw is None or not str(raw).strip():
         return False
@@ -539,6 +550,10 @@ def _classify_row(
             clean_raw_value(str(txn.category_raw)),
             txn.account_id,
             cleaned_resolved,
+        )
+    elif cleaned_resolved is not None:
+        category_match = lookup.resolve_empty_category_with_ref(
+            txn.account_id, cleaned_resolved
         )
 
     return _RowClassified(
@@ -973,5 +988,6 @@ def apply_mapping_plan(db: Session, plan: MappingPlanIn) -> ApplyResult:
             categories=unmapped["categories"],
             owners=unmapped["owners"],
             merchants=unmapped["merchants"],
+            merchants_without_category=unmapped["merchants_without_category"],
         ),
     )

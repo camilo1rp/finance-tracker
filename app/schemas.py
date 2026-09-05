@@ -25,7 +25,7 @@ class OwnerOut(BaseModel):
 
 class NormalizationMappingCreate(BaseModel):
     kind: str  # "transaction_type" | "category" | "owner" | "merchant"
-    raw_value: str
+    raw_value: Optional[str] = None
     canonical_value: str
     account_id: Optional[int] = None  # None = global rule
     merchant: Optional[str] = None  # category / transaction_type; None = all merchants
@@ -36,7 +36,7 @@ class NormalizationMappingOut(BaseModel):
 
     id: int
     kind: str
-    raw_value: str
+    raw_value: Optional[str] = None
     canonical_value: str
     account_id: Optional[int]
     merchant: Optional[str] = None
@@ -48,7 +48,7 @@ MappingKind = Literal["transaction_type", "category", "owner", "merchant"]
 class CreateMappingOp(BaseModel):
     op: Literal["create"] = "create"
     kind: MappingKind
-    raw_value: str
+    raw_value: Optional[str] = None
     canonical_value: str
     account_id: Optional[int] = None
     merchant: Optional[str] = None  # category or transaction_type; None = all merchants
@@ -175,7 +175,7 @@ class MappingPatchOut(BaseModel):
 
     id: int
     kind: str
-    raw_value: str
+    raw_value: Optional[str] = None
     canonical_value: str
     account_id: Optional[int]
     merchant: Optional[str] = None
@@ -229,6 +229,7 @@ class UnmappedValuesOut(BaseModel):
     categories: list[str]
     owners: list[str]
     merchants: list[str] = []
+    merchants_without_category: list[str] = []
 
 
 class SkippedOp(BaseModel):

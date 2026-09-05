@@ -83,7 +83,7 @@ class NormalizationMapping(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     kind: Mapped[str] = mapped_column(String)
-    raw_value: Mapped[str] = mapped_column(String)
+    raw_value: Mapped[str | None] = mapped_column(String, nullable=True)
     canonical_value: Mapped[str] = mapped_column(String)
     account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"), nullable=True)
     merchant: Mapped[str | None] = mapped_column(String, nullable=True)

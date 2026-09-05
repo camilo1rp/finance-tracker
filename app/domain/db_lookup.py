@@ -73,6 +73,15 @@ class DbNormalizationLookup(NormalizationLookup):
             return row.canonical_value
         return None
 
+    def resolve_empty_category(self, account_id: int, merchant: str) -> str | None:
+        row = self._best_empty_category_merchant(account_id, merchant)
+        if row is not None:
+            return row.canonical_value
+        row = self._best_empty_category_merchant(None, merchant)
+        if row is not None:
+            return row.canonical_value
+        return None
+
     def _rules_at_scope(
         self,
         kind: NormalizationKind,
@@ -99,7 +108,11 @@ class DbNormalizationLookup(NormalizationLookup):
         raw_value: str,
         account_id: int | None,
     ) -> NormalizationMapping | None:
-        rules = self._rules_at_scope(kind, account_id, merchant_scoped=False)
+        rules = [
+            row
+            for row in self._rules_at_scope(kind, account_id, merchant_scoped=False)
+            if row.raw_value is not None
+        ]
         return pick_best_pattern_match(rules, raw_value, lambda row: row.raw_value)
 
     def _best_merchant_scoped(
@@ -113,7 +126,8 @@ class DbNormalizationLookup(NormalizationLookup):
         matches = [
             row
             for row in rules
-            if pattern_matches(raw_value, row.raw_value)
+            if row.raw_value is not None
+            and pattern_matches(raw_value, row.raw_value)
             and row.merchant is not None
             and merchant_scope_matches(row_merchant, row.merchant, kind)
         ]
@@ -126,6 +140,26 @@ class DbNormalizationLookup(NormalizationLookup):
                 pattern_rank_key(row.merchant or ""),
             ),
         )
+
+    def _best_empty_category_merchant(
+        self,
+        account_id: int | None,
+        row_merchant: str,
+    ) -> NormalizationMapping | None:
+        rules = self._rules_at_scope(
+            NormalizationKind.CATEGORY, account_id, merchant_scoped=True
+        )
+        matches = [
+            row
+            for row in rules
+            if row.raw_value is None
+            and row.merchant is not None
+            and merchant_scope_matches(row_merchant, row.merchant, NormalizationKind.CATEGORY)
+        ]
+        if not matches:
+            return None
+        return min(matches, key=lambda row: pattern_rank_key(row.merchant or ""))
+
 
 
 def merged_lookup_from_db(

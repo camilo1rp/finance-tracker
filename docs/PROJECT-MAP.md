@@ -627,7 +627,7 @@ Field lists are **[C]** (read from the Pydantic classes). Behavioral notes that 
 | `ImportMappingIn` | `date_col`, `description_col`, `amount_col`, optional `category_col`, `owner_col`, `type_col`, `merchant_col`, `sign_convention` | `AccountCreate.default_mapping` |
 | `AccountCreate` | `name`, `last4`, `default_owner_id=None`, `source_format="csv"`, `default_mapping` | `POST /accounts` |
 | `AccountOut` | `id`, `name`, `last4`, `default_owner_id`, `source_format` | accounts HTTP; `list_accounts` tool (**no mapping**) |
-| `UnmappedValuesOut` | `transaction_types`, `categories`, `owners`, `merchants=[]` | import/reclass/apply/unmapped |
+| `UnmappedValuesOut` | `transaction_types`, `categories`, `owners`, `merchants=[]`, `merchants_without_category=[]` | import/reclass/apply/unmapped |
 | `SkippedOp` | `op: MappingOp`, `reason: "duplicate" \| "missing"` | `ApplyResult.skipped` |
 | `ApplyResult` | `created_ids`, `updated_ids`, `deleted_ids`, `skipped`, `overrides_set=0`, `overrides_removed=0`, `reclass_scanned`, `reclass_updated`, `unmapped_after` | apply HTTP; steward `apply_result` |
 | `ImportResult` | `account_id`, `import_batch_id`, `total_rows_read`, `inserted`, `duplicates_skipped`, `unmapped`, `errors` | `POST /imports` |
@@ -1239,7 +1239,7 @@ List accounts (id, name, last4).
 `get_unmapped_values`:
 
 ```
-Distinct raw type/category/owner/merchant values that still need mapping rules.
+Distinct raw type/category/owner/merchant values that still need mapping rules, plus merchants_without_category for rows with no bank category.
 ```
 
 `list_mappings`:
@@ -1315,13 +1315,14 @@ Optional transaction_type filters the list. limit must be >= 1.
 Preview a mapping plan against stored transactions. Performs no writes.
 
 ops is a list of create / update / delete / set_transaction_category / remove_transaction_override operations:
-- create: {op: "create", kind, raw_value, canonical_value, account_id?, merchant?}
+- create: {op: "create", kind, raw_value?, canonical_value, account_id?, merchant?}
 - update: {op: "update", mapping_id, canonical_value}  (changes an existing rule)
 - delete: {op: "delete", mapping_id}
 - set_transaction_category: {op: "set_transaction_category", transaction_id, category, evidence_ids?, rationale?}
 - remove_transaction_override: {op: "remove_transaction_override", transaction_id, rationale?}
 
 Identity of a create is (kind, cleaned raw_value, account_id, merchant).
+For empty bank categories, omit raw_value (or set null) on kind=category and supply merchant — only rows with blank category_raw match.
 If that identity exists with the same canonical, preview sets duplicate_of_existing_id.
 If it exists with a different canonical, preview sets conflicts_with_existing_id —
 do not resubmit the create; submit an update on that mapping_id instead.
@@ -1495,6 +1496,7 @@ Report only what the evidence states. If product_type is present, name it exactl
 You clean up normalization mappings.
 Workflow: fetch unmapped values → list_mappings for the kind (global, plus the account scope if relevant) → inspect examples → propose ops → always preview before submitting → submit the plan with the preview attached.
 Rules may be global or scoped to an account; category and transaction_type rules may also be scoped to a merchant. Propose ops and submit plans that match the scope the user requested. For a merchant-only type change (e.g. Western Union MISC_DEBIT → TRANSFER on one Chase account), create a transaction_type rule with that account_id and merchant — do not remap the raw type globally. Mapping patterns use `%` as a wildcard for any sequence; no `%` means exact match after trim+lowercase. Use `value%`, `%value`, or `%value%` to cover payee variants (e.g. `western union%` → "Western Union" for every CAPTURE/WEB ID string). Same `%` syntax applies to merchant scope. Never create one merchant rule per unique ACH string.
+When `merchants_without_category` appears in unmapped values, the bank sent no category for those merchants. Create `kind=category` with omitted or null `raw_value` and a required `merchant` pattern (e.g. merchant alias `irs usataxpymt%` → `IRS`, then category `{kind: "category", raw_value: null, merchant: "irs%", canonical: "taxes"}`). Do not invent a fake raw category key.
 Never claim anything was applied; applying happens only after a human approves.
 
 If preview reports conflicts_with_existing_id, submit an update on that mapping_id — never resubmit the create. Collapsing near-duplicate canonicals (e.g. Grocery/Groceries) is an update on the existing rule plus creates for other raw keys.

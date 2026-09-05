@@ -71,6 +71,49 @@ class NormalizationLookup(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def resolve_empty_category(
+        self,
+        account_id: int,
+        merchant: str,
+    ) -> Optional[str]:
+        """Category rules with null raw_value, matched on merchant only."""
+        raise NotImplementedError
+
+
+def normalize_mapping_create(
+    kind: NormalizationKind,
+    raw_value: str | None,
+    merchant: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    """Return ``(stored_raw_value, cleaned_merchant, error_message)``."""
+    cleaned_merchant = None
+    if merchant is not None and str(merchant).strip():
+        if not allows_merchant_scope(kind):
+            return (
+                None,
+                None,
+                "merchant scope is only allowed on category or transaction_type mappings",
+            )
+        cleaned_merchant = clean_raw_value(str(merchant))
+        merchant_error = validate_mapping_pattern(cleaned_merchant)
+        if merchant_error is not None:
+            return None, None, f"merchant {merchant_error}"
+
+    raw_blank = raw_value is None or not str(raw_value).strip()
+    if raw_blank:
+        if kind is not NormalizationKind.CATEGORY:
+            return None, cleaned_merchant, "raw_value is empty"
+        if cleaned_merchant is None:
+            return None, None, "category with empty raw_value requires merchant scope"
+        return None, cleaned_merchant, None
+
+    cleaned_raw = clean_raw_value(str(raw_value))
+    pattern_error = validate_mapping_pattern(cleaned_raw)
+    if pattern_error is not None:
+        return None, cleaned_merchant, pattern_error
+    return cleaned_raw, cleaned_merchant, None
+
 
 def allows_merchant_scope(kind: NormalizationKind | str) -> bool:
     value = kind.value if isinstance(kind, NormalizationKind) else kind
@@ -188,11 +231,13 @@ def classify_category(
     returns None if unmapped (caller falls back to raw_category for display,
     per the 3-tier precedence). `merchant` is the resolved merchant label
     (override > normalized > raw); it is cleaned here before lookup."""
-    if raw_category is None or not str(raw_category).strip():
-        return None
     cleaned_merchant = None
     if merchant is not None and str(merchant).strip():
         cleaned_merchant = clean_raw_value(str(merchant))
+    if raw_category is None or not str(raw_category).strip():
+        if cleaned_merchant is None:
+            return None
+        return lookup.resolve_empty_category(account_id, cleaned_merchant)
     return lookup.resolve(
         NormalizationKind.CATEGORY,
         clean_raw_value(str(raw_category)),

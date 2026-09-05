@@ -111,6 +111,7 @@ def fake_apply_result() -> ApplyResult:
             categories=[],
             owners=[],
             merchants=[],
+            merchants_without_category=[],
         ),
     )
 

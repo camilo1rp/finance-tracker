@@ -214,6 +214,30 @@ def test_unmapped_lists_raw_values(db_session: Session) -> None:
     assert summary["merchants"] == ["UNKNOWN MART"]
 
 
+def test_unmapped_merchants_without_category(db_session: Session) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "irs",
+        category_raw=None,
+        category_normalized=None,
+        merchant_raw="IRS USATAXPYMT",
+        merchant_normalized="IRS",
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "mapped",
+        category_raw=None,
+        category_normalized="taxes",
+        merchant_raw="IRS USATAXPYMT",
+        merchant_normalized="IRS",
+    )
+    summary = unmapped_summary(db_session)
+    assert summary["merchants_without_category"] == ["IRS"]
+
+
 def test_get_total_average_and_zero_rows(db_session: Session) -> None:
     empty = get_total(db_session, None, None, None, None)
     assert empty["total"] == Decimal("0.00")

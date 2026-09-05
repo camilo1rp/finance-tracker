@@ -187,6 +187,7 @@ def run_reclassification(
     unmapped_categories: set[str] = set()
     unmapped_owners: set[str] = set()
     unmapped_merchants: set[str] = set()
+    unmapped_merchants_without_category: set[str] = set()
 
     for txn in rows:
         changed = False
@@ -262,6 +263,13 @@ def run_reclassification(
             changed = True
         if txn.category_raw and new_category is None:
             unmapped_categories.add(txn.category_raw)
+        elif (
+            (txn.category_raw is None or not str(txn.category_raw).strip())
+            and new_category is None
+            and txn.category_override is None
+            and merchant_for_type
+        ):
+            unmapped_merchants_without_category.add(str(merchant_for_type).strip())
 
         if changed:
             updated += 1
@@ -274,6 +282,7 @@ def run_reclassification(
             categories=sorted(unmapped_categories),
             owners=sorted(unmapped_owners),
             merchants=sorted(unmapped_merchants),
+            merchants_without_category=sorted(unmapped_merchants_without_category),
         ),
     )
 

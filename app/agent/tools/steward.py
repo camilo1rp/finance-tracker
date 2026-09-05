@@ -17,13 +17,14 @@ _PREVIEW_DESCRIPTION = """\
 Preview a mapping plan against stored transactions. Performs no writes.
 
 ops is a list of create / update / delete / set_transaction_category / remove_transaction_override operations:
-- create: {op: "create", kind, raw_value, canonical_value, account_id?, merchant?}
+- create: {op: "create", kind, raw_value?, canonical_value, account_id?, merchant?}
 - update: {op: "update", mapping_id, canonical_value}  (changes an existing rule)
 - delete: {op: "delete", mapping_id}
 - set_transaction_category: {op: "set_transaction_category", transaction_id, category, evidence_ids?, rationale?}
 - remove_transaction_override: {op: "remove_transaction_override", transaction_id, rationale?}
 
 Identity of a create is (kind, cleaned raw_value, account_id, merchant).
+For empty bank categories, omit raw_value (or set null) on kind=category and supply merchant — only rows with blank category_raw match.
 If that identity exists with the same canonical, preview sets duplicate_of_existing_id.
 If it exists with a different canonical, preview sets conflicts_with_existing_id —
 do not resubmit the create; submit an update on that mapping_id instead.

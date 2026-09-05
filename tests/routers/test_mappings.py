@@ -380,7 +380,7 @@ def test_apply_endpoint_rejects_invalid_plan(client: TestClient) -> None:
         },
     )
     assert response.status_code == 422
-    assert "merchant only valid for category or transaction_type" in str(
+    assert "merchant scope is only allowed on category or transaction_type mappings" in str(
         response.json()["detail"]
     )
 
@@ -433,3 +433,61 @@ def test_patch_and_delete_reclassify(client: TestClient, db_session: Session) ->
     listed = client.get("/transactions", params={"account_id": account_id}).json()
     assert listed[0]["category_normalized"] is None
     assert _category_mappings(client) == []
+
+
+def test_create_empty_category_merchant_rule(client: TestClient, db_session: Session) -> None:
+    account_id = _account(client)
+    client.post(
+        "/mappings",
+        json={
+            "kind": "merchant",
+            "raw_value": "irs usataxpymt%",
+            "canonical_value": "IRS",
+            "account_id": account_id,
+        },
+    )
+    created = client.post(
+        "/mappings",
+        json={
+            "kind": "category",
+            "canonical_value": "taxes",
+            "merchant": "irs%",
+            "account_id": account_id,
+        },
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["raw_value"] is None
+    assert body["merchant"] == "irs%"
+
+    rejected = client.post(
+        "/mappings",
+        json={"kind": "category", "canonical_value": "taxes"},
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"] == "category with empty raw_value requires merchant scope"
+
+    db_session.add(
+        Transaction(
+            account_id=account_id,
+            transaction_date=date(2024, 6, 1),
+            description="IRS PAYMENT",
+            amount=Decimal("-100.00"),
+            transaction_type="SPEND",
+            is_spend=True,
+            category_raw=None,
+            category_normalized=None,
+            merchant_raw="IRS USATAXPYMT",
+            merchant_normalized="IRS",
+            dedupe_hash="empty-category-irs",
+            raw={},
+        )
+    )
+    db_session.commit()
+
+    result = client.post("/transactions/reclassify", params={"account_id": account_id})
+    assert result.status_code == 200, result.text
+    assert result.json()["unmapped"]["merchants_without_category"] == []
+
+    listed = client.get("/transactions", params={"account_id": account_id}).json()
+    assert listed[0]["category_normalized"] == "taxes"

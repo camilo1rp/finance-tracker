@@ -184,6 +184,7 @@ def normalize_rows(
     unmapped_categories: set[str] = set()
     unmapped_owners: set[str] = set()
     unmapped_merchants: set[str] = set()
+    unmapped_merchants_without_category: set[str] = set()
 
     for index, row in enumerate(rows):
         try:
@@ -198,6 +199,15 @@ def normalize_rows(
             unmapped_types.add(txn.raw_type)
         if txn.category_raw and txn.category_normalized is None:
             unmapped_categories.add(txn.category_raw)
+        elif (
+            (txn.category_raw is None or not str(txn.category_raw).strip())
+            and txn.category_normalized is None
+        ):
+            merchant_for_cat = resolved_merchant(
+                txn.merchant_raw, txn.merchant_normalized
+            )
+            if merchant_for_cat:
+                unmapped_merchants_without_category.add(merchant_for_cat)
         if mapping.owner_col and txn.owner_raw is not None and txn.owner is None:
             unmapped_owners.add(txn.owner_raw)
         if txn.merchant_raw and txn.merchant_normalized is None:
@@ -212,6 +222,7 @@ def normalize_rows(
             categories=sorted(unmapped_categories),
             owners=sorted(unmapped_owners),
             merchants=sorted(unmapped_merchants),
+            merchants_without_category=sorted(unmapped_merchants_without_category),
         ),
         errors,
     )

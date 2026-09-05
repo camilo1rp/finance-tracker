@@ -22,7 +22,7 @@ from app.domain.classification import (
 @dataclass(frozen=True)
 class RuleSpec:
     kind: str
-    raw_value: str  # already cleaned (trim + lowercase); may include %
+    raw_value: str | None  # cleaned; may include %; None = empty-category merchant rule
     canonical_value: str
     account_id: int | None
     merchant: str | None  # category / transaction_type; None = all merchants
@@ -54,7 +54,7 @@ class MergedNormalizationLookup(NormalizationLookup):
         self._rules = list(rules)
         # Exact-scope index. On a tie, keep the db: rule (or the first one).
         self._by_scope: dict[
-            tuple[str, str, int | None, str | None], RuleSpec
+            tuple[str, str | None, int | None, str | None], RuleSpec
         ] = {}
         for rule in rules:
             key = (
@@ -77,9 +77,23 @@ class MergedNormalizationLookup(NormalizationLookup):
         account_id: int,
         merchant: str | None = None,
     ) -> str | None:
-        """`raw_value` and `merchant` must already be cleaned, same as DbNormalizationLookup."""
         match = self.resolve_with_ref(kind, raw_value, account_id, merchant)
         return None if match is None else match.value
+
+    def resolve_empty_category(self, account_id: int, merchant: str) -> str | None:
+        match = self.resolve_empty_category_with_ref(account_id, merchant)
+        return None if match is None else match.value
+
+    def resolve_empty_category_with_ref(
+        self, account_id: int, merchant: str
+    ) -> RuleMatch | None:
+        hit = self._best_empty_category_merchant(account_id, merchant)
+        if hit is not None:
+            return RuleMatch(hit.canonical_value, hit.ref)
+        hit = self._best_empty_category_merchant(None, merchant)
+        if hit is not None:
+            return RuleMatch(hit.canonical_value, hit.ref)
+        return None
 
     def resolve_with_ref(
         self,
@@ -142,7 +156,11 @@ class MergedNormalizationLookup(NormalizationLookup):
         raw_value: str,
         account_id: int | None,
     ) -> RuleSpec | None:
-        rules = self._rules_at_scope(kind, account_id, merchant_scoped=False)
+        rules = [
+            rule
+            for rule in self._rules_at_scope(kind, account_id, merchant_scoped=False)
+            if rule.raw_value is not None
+        ]
         matches = [
             rule for rule in rules if pattern_matches(raw_value, rule.raw_value)
         ]
@@ -167,7 +185,8 @@ class MergedNormalizationLookup(NormalizationLookup):
         matches = [
             rule
             for rule in rules
-            if pattern_matches(raw_value, rule.raw_value)
+            if rule.raw_value is not None
+            and pattern_matches(raw_value, rule.raw_value)
             and rule.merchant is not None
             and merchant_scope_matches(row_merchant, rule.merchant, kind)
         ]
@@ -177,6 +196,33 @@ class MergedNormalizationLookup(NormalizationLookup):
             matches,
             key=lambda rule: (
                 pattern_rank_key(rule.raw_value),
+                pattern_rank_key(rule.merchant or ""),
+                _ref_priority(rule.ref),
+            ),
+        )
+
+    def _best_empty_category_merchant(
+        self,
+        account_id: int | None,
+        row_merchant: str,
+    ) -> RuleSpec | None:
+        rules = self._rules_at_scope(
+            NormalizationKind.CATEGORY.value, account_id, merchant_scoped=True
+        )
+        matches = [
+            rule
+            for rule in rules
+            if rule.raw_value is None
+            and rule.merchant is not None
+            and merchant_scope_matches(
+                row_merchant, rule.merchant, NormalizationKind.CATEGORY
+            )
+        ]
+        if not matches:
+            return None
+        return min(
+            matches,
+            key=lambda rule: (
                 pattern_rank_key(rule.merchant or ""),
                 _ref_priority(rule.ref),
             ),

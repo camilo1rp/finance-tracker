@@ -6,9 +6,7 @@ from app.database import get_session
 from app.domain.classification import (
     NormalizationKind,
     TransactionType,
-    allows_merchant_scope,
-    clean_raw_value,
-    validate_mapping_pattern,
+    normalize_mapping_create,
 )
 from app.models import Account, NormalizationMapping
 from app.schemas import (
@@ -91,13 +89,19 @@ def create_mapping(
             ) from None
 
     cleaned_merchant = None
-    if payload.merchant is not None and payload.merchant.strip():
-        if not allows_merchant_scope(kind):
+    cleaned, cleaned_merchant, mapping_error = normalize_mapping_create(
+        kind, payload.raw_value, payload.merchant
+    )
+    if mapping_error is not None:
+        if "merchant scope" in mapping_error:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="merchant scope is only allowed on category or transaction_type mappings",
-            )
-        cleaned_merchant = clean_raw_value(payload.merchant)
+                detail=mapping_error,
+            ) from None
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=mapping_error,
+        ) from None
 
     if payload.account_id is not None and db.get(Account, payload.account_id) is None:
         raise HTTPException(
@@ -105,24 +109,13 @@ def create_mapping(
             detail=f"account {payload.account_id} not found",
         )
 
-    cleaned = clean_raw_value(payload.raw_value)
-    pattern_error = validate_mapping_pattern(cleaned)
-    if pattern_error is not None:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=pattern_error,
-        )
-    if cleaned_merchant is not None:
-        merchant_pattern_error = validate_mapping_pattern(cleaned_merchant)
-        if merchant_pattern_error is not None:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=f"merchant {merchant_pattern_error}",
-            )
     existing_q = select(NormalizationMapping).where(
         NormalizationMapping.kind == kind.value,
-        NormalizationMapping.raw_value == cleaned,
     )
+    if cleaned is None:
+        existing_q = existing_q.where(NormalizationMapping.raw_value.is_(None))
+    else:
+        existing_q = existing_q.where(NormalizationMapping.raw_value == cleaned)
     if payload.account_id is None:
         existing_q = existing_q.where(NormalizationMapping.account_id.is_(None))
     else:

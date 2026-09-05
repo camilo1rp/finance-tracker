@@ -8,6 +8,7 @@ from app.domain.classification import (
     clean_raw_value,
     has_wildcard,
     merchant_scope_matches,
+    normalize_mapping_create,
     pattern_matches,
     pattern_rank_key,
     pick_best_pattern_match,
@@ -194,3 +195,38 @@ def test_classify_merchant_uses_raw_value_wildcard() -> None:
         "Marshalls"
     )
     assert classify_merchant("Woodlake Op RENT", lookup, account_id=3) is None
+
+
+def test_classify_category_empty_raw_uses_merchant_rule() -> None:
+    lookup = InMemoryNormalizationLookup(
+        global_merchant_rules={
+            (NormalizationKind.CATEGORY, None, "irs%"): "taxes",
+        },
+        account_merchant_rules={
+            (1, NormalizationKind.CATEGORY, None, "irs%"): "account taxes",
+        },
+    )
+    assert (
+        classify_category(None, lookup, account_id=1, merchant="IRS")
+        == "account taxes"
+    )
+    assert classify_category(None, lookup, account_id=2, merchant="IRS") == "taxes"
+    assert classify_category(None, lookup, account_id=1, merchant="Costco") is None
+    assert (
+        classify_category("Other", lookup, account_id=1, merchant="IRS") is None
+    )
+
+
+def test_normalize_mapping_create_empty_category_requires_merchant() -> None:
+    cleaned, merchant, error = normalize_mapping_create(
+        NormalizationKind.CATEGORY, None, "irs%"
+    )
+    assert error is None
+    assert cleaned is None
+    assert merchant == "irs%"
+
+    _, _, error = normalize_mapping_create(NormalizationKind.CATEGORY, None, None)
+    assert error == "category with empty raw_value requires merchant scope"
+
+    _, _, error = normalize_mapping_create(NormalizationKind.OWNER, None, None)
+    assert error == "raw_value is empty"

@@ -146,6 +146,27 @@ Do **not** create one merchant alias per capture id. One wildcard alias is enoug
 
 Same for Marshalls-style store-number suffixes (`marshalls%` hits `marshalls #59 …`).
 
+**Empty bank category** — Chase ACH rows often have no `category_raw`. After a merchant alias, map by resolved merchant (not the raw payee string):
+
+```json
+{
+  "kind": "merchant",
+  "raw_value": "irs usataxpymt%",
+  "canonical_value": "IRS",
+  "account_id": "<checking_account_id>"
+}
+```
+
+```json
+{
+  "kind": "category",
+  "canonical_value": "taxes",
+  "merchant": "irs%"
+}
+```
+
+Omit `raw_value` (or set `null`). Rows with a non-empty bank category ignore this rule.
+
 **Type mappings** — `POST /mappings` only for values **not** covered by seeds (global):
 
 | raw_value | canonical_value |

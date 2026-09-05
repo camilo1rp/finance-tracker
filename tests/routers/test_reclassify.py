@@ -298,3 +298,56 @@ def test_reclassify_type_uses_merchant_scope(
 def test_reclassify_unknown_account(client: TestClient) -> None:
     response = client.post("/transactions/reclassify", params={"account_id": 999})
     assert response.status_code == 404
+
+
+def test_reclassify_reports_merchants_without_category(
+    client: TestClient, db_session: Session
+) -> None:
+    owner = client.post("/owners", json={"name": "Camilo Romero"}).json()
+    account = client.post(
+        "/accounts",
+        json={
+            "name": "Chase",
+            "last4": "9470",
+            "account_kind": "depository",
+            "default_owner_id": owner["id"],
+            "default_mapping": {
+                "date_col": "Transaction Date",
+                "description_col": "Description",
+                "amount_col": "Amount",
+                "type_col": "Type",
+            },
+        },
+    )
+    assert account.status_code == 201, account.text
+    account = account.json()
+    client.post(
+        "/mappings",
+        json={
+            "kind": "merchant",
+            "raw_value": "irs usataxpymt%",
+            "canonical_value": "IRS",
+            "account_id": account["id"],
+        },
+    )
+    db_session.add(
+        Transaction(
+            account_id=account["id"],
+            owner_id=owner["id"],
+            transaction_date=date(2024, 6, 1),
+            description="IRS PAYMENT",
+            amount=Decimal("-100.00"),
+            transaction_type="SPEND",
+            is_spend=True,
+            category_raw=None,
+            merchant_raw="IRS USATAXPYMT",
+            merchant_normalized=None,
+            dedupe_hash="reclassify-irs-empty-cat",
+            raw={},
+        )
+    )
+    db_session.commit()
+
+    result = client.post("/transactions/reclassify", params={"account_id": account["id"]})
+    assert result.status_code == 200, result.text
+    assert result.json()["unmapped"]["merchants_without_category"] == ["IRS"]

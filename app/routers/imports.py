@@ -45,6 +45,7 @@ def import_csv(
             categories=result.unmapped.categories,
             owners=result.unmapped.owners,
             merchants=result.unmapped.merchants,
+            merchants_without_category=result.unmapped.merchants_without_category,
         ),
         errors=result.errors,
     )

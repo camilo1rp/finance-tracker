@@ -65,8 +65,13 @@ def _op_label(op: dict) -> str:
         return f"remove transaction {op.get('transaction_id')} override"
     scope = f"account={op.get('account_id')}" if op.get("account_id") else "global"
     merchant = f"merchant={op.get('merchant')}" if op.get("merchant") else "all merchants"
+    raw = op.get("raw_value")
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+        raw_label = "raw_value=null"
+    else:
+        raw_label = f"{raw!r}"
     return (
-        f"{op.get('kind')}  {op.get('raw_value')!r} -> "
+        f"{op.get('kind')}  {raw_label} -> "
         f"{op.get('canonical_value')!r}  ({scope}, {merchant})"
     )
 
