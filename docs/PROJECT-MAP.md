@@ -12,7 +12,7 @@ Planning reference for `finance-tracker-skeleton`. Derived from source and tests
 | Enrichment range | **13** commits `265803b`…`28dd469` (enrichment A through live-run lessons), plus closeout `4769fa9` |
 | Python (venv, as of generation) | 3.14.5. **Studio requires ≥3.11 and &lt;3.14** — do not plan Studio against this venv; use Dockerfile 3.12 or a 3.11–3.13 venv. [D] Studio pin from LangGraph CLI docs / `langgraph.json` comment in prior map; Dockerfile is [C] `python:3.12-slim`. |
 | Dockerfile base | `python:3.12-slim` [C] |
-| Tests | **300 passed**, 2 deselected (`live_gmail`, `live_gmail_rest`) (`pytest --collect-only`: 300/302) [T] |
+| Tests | **326 passed**, 2 deselected (`live_gmail`, `live_gmail_rest`) |
 
 ### Reconciled counts
 
@@ -214,6 +214,7 @@ Nine tables. No Alembic; `app/database.py::init_db` runs `Base.metadata.create_a
 | last4 | String | no | — | |
 | default_owner_id | Integer FK → `owners.id` | yes | — | |
 | source_format | String | no | HTTP `"csv"` | comment: extensible `"pdf"`/`"api"` |
+| account_kind | String | no | `"depository"` | `AccountKind`: `credit_card` \| `depository`. **Required on HTTP create**; backfill in `init_db` only (`type_col` set → card, else depository). |
 | default_mapping | JSON | no | — | serialized `ImportMapping` dict. Comment says JSONB; type is `JSON`. |
 
 Relationship: `default_owner`, `transactions`.
@@ -271,8 +272,9 @@ Constraint (verbatim): `UniqueConstraint("dedupe_hash", name="uq_transaction_ded
 | transaction_date | Date | no | |
 | description | String | no | stripped |
 | amount | Numeric(12, 2) | no | signed as imported |
-| transaction_type | String | no | `TransactionType` value |
-| is_spend | Boolean | no | `transaction_type == SPEND` |
+| transaction_type | String | no | `TransactionType` value (classified) |
+| type_override | String | yes | PATCH-only effective type override; reclassify never writes |
+| is_spend | Boolean | no | **`effective_type == SPEND`** — updated by ingest, reclassify, PATCH |
 | raw_type | String | yes | type cell stripped; None for sign-derived |
 | category_raw | String | yes | stripped, not lowercased |
 | category_normalized | String | yes | lookup canonical or None |
@@ -298,6 +300,11 @@ effective_merchant = case(
     (Transaction.merchant_override.isnot(None), Transaction.merchant_override),
     (Transaction.merchant_normalized.isnot(None), Transaction.merchant_normalized),
     else_=Transaction.merchant_raw,
+)
+
+effective_type = case(
+    (Transaction.type_override.isnot(None), Transaction.type_override),
+    else_=Transaction.transaction_type,
 )
 ```
 
@@ -389,7 +396,9 @@ No FK to transactions: a proposal may reference several. Written by `submit_reco
 
 ### 3.11 Enums (verbatim value sets)
 
-`app/domain/classification.py::TransactionType`: `SPEND`, `REFUND`, `PAYMENT`, `ADJUSTMENT`, `UNKNOWN`.
+`app/domain/classification.py::TransactionType`: `SPEND`, `INCOME`, `TRANSFER`, `REFUND`, `FEE`, `ADJUSTMENT`, `UNKNOWN`. Legacy `PAYMENT` remains in the enum for migrated rows only; resolver never emits it; HTTP mapping create rejects `PAYMENT` (422).
+
+`app/domain/classification.py::AccountKind`: `credit_card`, `depository`.
 
 `app/domain/classification.py::NormalizationKind`: `transaction_type`, `category`, `owner`, `merchant`.
 
@@ -405,7 +414,7 @@ No FK to transactions: a proposal may reference several. Written by `submit_reco
 
 Applied at write: `app/routers/mappings.py::create_mapping` (raw_value + merchant), `app/services/mapping_preview_service.py::_create_spec` / `_cleaned_merchant`. Canonical values are **not** cleaned.
 
-Applied at read: `classify_transaction_type`, `classify_category` (raw + merchant), `classify_owner`, `classify_merchant` — all in `app/domain/classification.py`. Lookups assume already-cleaned keys (`DbNormalizationLookup.resolve`, `MergedNormalizationLookup.resolve`).
+Applied at read: `classify_transaction_type` (raw + merchant), `classify_category` (raw + merchant), `classify_owner`, `classify_merchant` — all in `app/domain/classification.py`. Lookups assume already-cleaned keys (`DbNormalizationLookup.resolve`, `MergedNormalizationLookup.resolve`).
 
 Not cleaned: `category_raw` / `owner_raw` / `raw_type` / `description` as stored on transactions (stripped only). Merchant extraction collapses whitespace (`extract_merchant` / merchant_col `" ".join(str.split())`).
 
@@ -543,7 +552,7 @@ Shared analytics query params (unless noted): `date_from: date | None = None`, `
 
 | Method | Path | Params | Body | Response | Status | Delegates | Quirks |
 |---|---|---|---|---|---|---|---|
-| POST | `/mappings` | — | `NormalizationMappingCreate` | `NormalizationMappingOut` | 201; 404 unknown account; 409 identity exists; 422 bad kind / type canonical / merchant-on-non-category | inline insert | **Does not reclassify.** Cleans raw_value + merchant. Commits in router. |
+| POST | `/mappings` | — | `NormalizationMappingCreate` | `NormalizationMappingOut` | 201; 404 unknown account; 409 identity exists; 422 bad kind / type canonical / merchant-on-owner-or-merchant-kind | inline insert | **Does not reclassify.** Cleans raw_value + merchant. `merchant` allowed on category and transaction_type. Commits in router. |
 | GET | `/mappings` | `kind=None`, `account_id=None` | — | `list[NormalizationMappingOut]` | 200; 422 bad kind | inline select | `account_id` **excludes** globals (`IS NULL` not included). |
 | POST | `/mappings/preview` | — | `MappingPlanIn` | `MappingPreview` | 200 | `preview_mappings` | Pure read. Invalid ops listed in `validation_errors`; valid ops still scored. |
 | POST | `/mappings/apply` | — | `MappingPlanIn` | `ApplyResult` | 200; 422 `MappingPlanValidationError.errors`; 404 unknown `plan.account_id` | `apply_mapping_plan` | Writes + reclassify one txn; idempotent re-apply. |
@@ -554,7 +563,7 @@ Shared analytics query params (unless noted): `date_from: date | None = None`, `
 
 | Method | Path | Params | Body | Response | Status | Delegates | Quirks |
 |---|---|---|---|---|---|---|---|
-| POST | `/imports` | `account_id: int` (query) | multipart `file: UploadFile` | `ImportResult` | **200** (not 201); 404 unknown account | `ingest_from_source` (`CsvSource`, `fetch_kwargs={"file_path": file.file}`) | Always creates an `ImportBatch`. |
+| POST | `/imports` | `account_id: int`, `allow_duplicates: bool=false` (query) | multipart `file: UploadFile` | `ImportResult` | **200** (not 201); 404 unknown account | `ingest_from_source` (`CsvSource`, `fetch_kwargs={"file_path": file.file}`) | Always creates an `ImportBatch`. `allow_duplicates=true` keeps same-identity rows (occurrence-suffixed hash). |
 
 ### 4.6 `app/routers/transactions.py` (3)
 
@@ -574,7 +583,7 @@ All except `/unmapped` and `/search` default `spend_only=True`. All except `/unm
 | GET | `/analytics/by-category` | — | `list[GroupSummary]` | `summarize(..., "category")` |
 | GET | `/analytics/by-owner` | — | `list[GroupSummary]` | `summarize(..., "owner")` |
 | GET | `/analytics/by-month` | — | `list[GroupSummary]` | `summarize(..., "month")` |
-| GET | `/analytics/total` | — | `TotalOut` | `get_total` |
+| GET | `/analytics/total` | — | `TotalOut` (`by_type`, purchases, spend, `net_cash_flow`) | `get_total` |
 | GET | `/analytics/top-merchants` | `limit: int = 10` (`ge=1`) | `list[MerchantSummary]` | `top_merchants` |
 | GET | `/analytics/largest` | `limit: int = 10` (`ge=1`) | `list[TransactionOut]` | `largest_transactions` |
 | GET | `/analytics/search` | required `query: str`; `limit: int = 50` (`ge=1`); **no `spend_only`** | `list[TransactionOut]` | `search_transactions` (`spend_only=False`) |
@@ -625,7 +634,8 @@ Field lists are **[C]** (read from the Pydantic classes). Behavioral notes that 
 | `ReclassifyResultOut` | `scanned`, `updated`, `unmapped` | `POST /transactions/reclassify` |
 | `TransactionPatch` | `category_override=None`, `owner_id=None`, `merchant_override=None` | PATCH txn |
 | `GroupSummary` | `group_value`, `total`, `count` | summarize |
-| `TotalOut` | `total`, `count`, `average` | get_total |
+| `TypeTotalOut` | `transaction_type`, `total` (abs), `count` | `TotalOut.by_type` |
+| `TotalOut` | `by_type`, `purchases`, `refunds`, `spend` (purchases−refunds), `net_cash_flow`, `total`, `count`, `average`, `sign_convention` | get_total |
 | `MerchantSummary` | `merchant`, `total`, `count` | top_merchants |
 
 **Discriminated union:** `MappingOp = Annotated[Union[CreateMappingOp, UpdateMappingOp, DeleteMappingOp, SetTransactionCategoryOp, RemoveTransactionOverrideOp], Field(discriminator="op")]`. Parser: `app/schemas.py::parse_mapping_op` (passthrough if already a model; else `TypeAdapter`). **No `rules` field and no alias** on `MappingPlanIn`.
@@ -670,7 +680,7 @@ Field lists are **[C]** (read from the Pydantic classes). Behavioral notes that 
 ### 6.3 `sources.py`
 
 - `TransactionSource.fetch(**kwargs) -> list[dict]` — ABC; raw rows, no transform.
-- `CsvSource.fetch` — requires `file_path` (or `file`); `pandas.read_csv`; NaN → None. Proven: `tests/domain/test_sources.py`.
+- `CsvSource.fetch` — requires `file_path` (or `file`); `pandas.read_csv(..., index_col=False)` so extra trailing fields (Chase bank CSVs) do not become the index; NaN → None. Proven: `tests/domain/test_sources.py`.
 - Commented placeholders: `PdfSource`, `ApiSource`.
 
 ### 6.4 `normalize.py`
@@ -679,14 +689,15 @@ Date formats tried in order: `%Y-%m-%d`, `%m/%d/%Y`, `%m/%d/%y`, `%Y/%m/%d`, `%d
 
 Amount: Decimal; strip `$` and `,`; `(12.00)` → negative; bool rejected.
 
-- `normalize_row(row, mapping, account_id, default_owner, lookup) -> CanonicalTransaction` — extract cells; type via lookup if `type_col` else sign; merchant from `merchant_col` (whitespace-collapsed) or `extract_merchant(description)`; category via lookup using `resolved_merchant(raw, normalized)`; owner via lookup if owner cell present else `default_owner`. Empty owner cell → default owner, `owner_raw is None`.
-- `normalize_rows(...) -> (list[CanonicalTransaction], UnmappedValues, list[str])` — row failures collected (`row {i}: ...`); unmapped sets for UNKNOWN type / None category / None owner (only if owner_col) / None merchant.
+- `normalize_row(row, mapping, account_id, default_owner, lookup, account_kind=depository) -> CanonicalTransaction` — extract cells; merchant from `merchant_col` or `extract_merchant(description)` then `classify_merchant`; **`transaction_type_resolver.resolve_transaction_type`** with that resolved merchant: mapped raw type wins (merchant-scoped type rules apply); else explicit `sign_convention` (zero → ADJUSTMENT; spend-signed → SPEND; other + `credit_card` → TRANSFER; other + `depository` → INCOME); else UNKNOWN. **`account_kind` does not infer sign convention.** Category via lookup using `resolved_merchant`; owner via lookup if owner cell present else `default_owner`. Empty owner cell → default owner, `owner_raw is None`.
+- `normalize_rows(..., account_kind=depository) -> (list[CanonicalTransaction], UnmappedValues, list[str])` — row failures collected (`row {i}: ...`); unmapped sets for UNKNOWN type / None category / None owner (only if owner_col) / None merchant.
 
-Sign fallback: `NEGATIVE_IS_SPEND` → amount `< 0` SPEND else PAYMENT; `POSITIVE_IS_SPEND` opposite. `raw_type` is None.
+Sign fallback runs only when `mapping.sign_convention` is set and raw type did not map. `raw_type` is None for sign-derived rows.
 
 ### 6.5 `dedupe.py`
 
 - `compute_dedupe_hash(txn) -> str` — sha256 of `f"{account_id}|{date.isoformat()}|{amount.quantize(Decimal('0.01'))}|{description}"`.
+- `assign_dedupe_hashes(candidates, allow_duplicates=False)` — identity hash; if `allow_duplicates`, later same-identity rows get `sha256(base|occ=N)`.
 - `DedupeSplit(new, duplicates)`.
 - `split_new_and_duplicates(candidates, existing_hashes)` — membership plus within-batch: first hash wins, later copies are duplicates.
 
@@ -694,15 +705,19 @@ Sign fallback: `NEGATIVE_IS_SPEND` → amount `< 0` SPEND else PAYMENT; `POSITIV
 
 - `NormalizationLookup.resolve(kind, raw_value, account_id, merchant=None) -> str | None` — keys already cleaned; None → caller fallback.
 - `clean_raw_value` — see §3.12. [C]
-- `classify_transaction_type` — empty → UNKNOWN; lookup miss or invalid canonical → UNKNOWN.
+- `classify_transaction_type` — empty → UNKNOWN; lookup miss or invalid canonical → UNKNOWN. Cleans merchant then lookup (same as category).
+- `allows_merchant_scope` — category and transaction_type.
+- `merchant_scope_matches` — exact cleaned match; type also accepts space-bounded prefix (`western union` hits `western union capture 623…`).
 - `classify_category` — empty → None; cleans merchant then lookup.
 - `classify_owner` / `classify_merchant` — empty → None; miss → None (passthrough to raw at display).
 
 ### 6.7 `NormalizationLookup` implementations — precedence
 
-**Category** (both DB and merged): account+merchant → account (merchant NULL) → global+merchant → global. Proven: `tests/domain/test_merged_lookup.py::test_category_precedence_account_merchant_to_global`, `tests/fakes.py::InMemoryNormalizationLookup`, `tests/routers/test_mappings.py::test_category_mapping_merchant_scope`.
+**Category and transaction_type** (both DB and merged): account+merchant → account (merchant NULL) → global+merchant → global. Type merchant scope also accepts a space-bounded prefix. Proven: `tests/domain/test_merged_lookup.py::test_category_precedence_account_merchant_to_global`, `test_transaction_type_precedence_account_merchant_to_global`, `tests/fakes.py::InMemoryNormalizationLookup`, `tests/routers/test_mappings.py::test_category_mapping_merchant_scope`, `test_transaction_type_mapping_merchant_scope`.
 
-**Other kinds:** account (merchant ignored) → global. Proven: `test_non_category_account_then_global_ignores_merchant`.
+**Owner kind:** account (merchant ignored) → global. Proven: `test_owner_and_merchant_kinds_ignore_merchant_scope`.
+
+**Merchant kind:** account then global. After exact miss, space-bounded prefix on `raw_value` (longest prefix wins). `western union` hits `western union capture 623…`. Proven: `test_merchant_kind_raw_value_prefix`, `test_classify_merchant_uses_raw_value_prefix`, `test_merchant_mapping_raw_value_prefix`.
 
 #### `app/domain/db_lookup.py::DbNormalizationLookup`
 
@@ -731,14 +746,14 @@ Exact-scope index key: `(kind, raw_value, account_id, merchant)`. Same-scope tie
 
 | Field | Recomputed when | Never touched |
 |---|---|---|
-| `transaction_type` + `is_spend` | `raw_type` present | sign-derived rows (`raw_type` empty) |
+| `transaction_type` + `is_spend` | **always** via resolver after merchant is resolved (lookup if `raw_type` + resolved merchant, else sign+kind when `sign_convention` set, else UNKNOWN). `is_spend` from effective type (`type_override` wins). | `type_override`, sign-derived rows are still recomputed (not frozen) |
 | `owner_id` | `owner_raw` present | account-default-only rows |
 | `merchant_raw` | currently empty: backfill from `default_mapping.merchant_col` in `raw`, else `raw["Merchant"]`, else `extract_merchant(description)` (`_backfill_merchant_raw`) | non-empty `merchant_raw` |
 | `merchant_normalized` | always from current/backfilled raw | `merchant_override` |
 | `category_normalized` | always from `category_raw` + `resolved_merchant(raw, new_normalized, merchant_override)` | `category_raw`, `category_override` |
 | others | — | amount, date, description, hash, `raw`, overrides |
 
-Proven: `tests/routers/test_reclassify.py::*`, `tests/services/test_mapping_preview.py::test_preview_gates`. [T]
+Proven: `tests/routers/test_reclassify.py::*`, `tests/services/test_mapping_preview.py::test_preview_gates`, `tests/services/test_reclassify_sign_only.py`. Preview `_rule_in_scope` for type **ops** still requires `raw_type`. [T]
 
 ### 6.10 `email_source.py` — port, allowlist, fixture
 
@@ -862,9 +877,9 @@ Unmarked behavior in this section is **[C]** unless a `Proven:` / `[T]` citation
 
 **`ingest_from_source(db, account_id, source, fetch_kwargs, filename) -> IngestResult`**
 
-Order: load Account → `resolve_mapping(mapping_from_stored(...))` → default owner name → `source.fetch` → `DbNormalizationLookup` → `normalize_rows` → hash each → existing hashes for account → split → resolve owner names to ids → create `ImportBatch` (`flush`) → insert `split.new` → **`db.commit()`**. Rolls back only if that commit/session fails (no explicit try/rollback). Side effect: batch + rows. Idempotent on re-import: duplicates skipped, new batch still inserted with `inserted=0`. Proven: `tests/routers/test_imports.py::test_import_pipeline_dedupe_filter_and_patch`.
+Order: load Account → `resolve_mapping(mapping_from_stored(...))` → default owner name → `source.fetch` → `DbNormalizationLookup` → `normalize_rows(..., account_kind=account.account_kind)` → `assign_dedupe_hashes(..., allow_duplicates)` → existing hashes for account → split → resolve owner names to ids → create `ImportBatch` (`flush`) → insert `split.new` → **`db.commit()`**. Rolls back only if that commit/session fails (no explicit try/rollback). Side effect: batch + rows. Idempotent on re-import: duplicates skipped, new batch still inserted with `inserted=0`. `allow_duplicates=true` inserts same-identity rows via occurrence-suffixed hashes; replay of the same file still skips. Proven: `tests/routers/test_imports.py::test_import_pipeline_dedupe_filter_and_patch`, `test_import_allow_duplicates_inserts_identical_rows`.
 
-**`run_reclassification(db, account_id=None) -> ReclassifyResult`** — **does not commit**. Caller owns the transaction. 404-equivalent: `AccountNotFoundError` if account_id set and missing. Mutates ORM objects in the session.
+**`run_reclassification(db, account_id=None) -> ReclassifyResult`** — **does not commit**. Caller owns the transaction. Always recomputes `transaction_type` via resolver (sign-only rows included); never writes `type_override`. Startup `init_db` may call once when legacy `PAYMENT` rows remain (after mapping canonical migration). 404-equivalent: `AccountNotFoundError` if account_id set and missing. Mutates ORM objects in the session.
 
 **`reclassify_transactions(db, account_id=None) -> ReclassifyResult`** — `run_reclassification` then **`db.commit()`**.
 
@@ -874,11 +889,13 @@ Order: load Account → `resolve_mapping(mapping_from_stored(...))` → default 
 
 All read-only; no commit.
 
-**`_apply_filters`** — `date_to` → today; optional date_from/account/owner/merchant; optional spend_only (`transaction_type == SPEND`).
+**`_apply_filters`** — `date_to` → today; optional date_from/account/owner/merchant; optional `transaction_type` (filters **`effective_type`**, ignores `spend_only`); else `spend_only=True` → **`effective_type == SPEND`**.
+
+**`cash_flow(...)`** — `{spend, income, refunds, fees, transfers, other, net, other_count}` by effective type (`abs(amount)`). `net = income + refunds − spend − fees`; excludes `transfers` and `other` (ADJUSTMENT, UNKNOWN). Household `net` can double-count card spend vs checking card-pay until account-scoped `loan_pmt` rule or `type_override`. Proven: `tests/routers/test_cash_flow.py`.
 
 **`summarize(db, date_from, date_to, account_id, owner_id, group_by, spend_only=True, merchant=None) -> list[dict]`** — keys: category=`coalesce(effective_category, "(unassigned)")`; owner=`coalesce(Owner.name, "(unassigned)")`; account=`Account.name`; month=`YYYY-MM` (`strftime` sqlite / `to_char` else); merchant=`coalesce(effective_merchant, "(unassigned)")`. Month ordered by key; others `total desc, key`. `UNASSIGNED = "(unassigned)"`.
 
-**`get_total(...)`** — total, count, average quantized 0.01; zero rows → all `0.00`.
+**`get_total(...)`** — `by_type` is abs magnitudes per effective type. Type `SPEND` = purchases. `purchases`/`refunds` those buckets; `spend`/`total` = purchases − refunds; `net_cash_flow` = income + refunds − purchases − fees (same as `cash_flow.net`); `count`/`average` over purchase rows unless `transaction_type` is set. `sign_convention` when `account_id` is set.
 
 **`top_merchants(..., limit=10, merchant=None)`** — group effective merchant, limit.
 
@@ -1269,12 +1286,8 @@ to break down by category.
 `get_total`:
 
 ```
-Return total, count, and average for matching transactions.
-
-Defaults: spend_only=true (only SPEND rows; totals use abs(amount)) and
-date_to=today. spend_only=false sums signed amounts as stored.
-merchant matches the effective value (override → normalized → raw).
-Amounts are decimal strings.
+Return per-type magnitudes, net spending (purchases − refunds), and net_cash_flow
+(income + refunds − purchases − fees). Type SPEND means purchases, not spend.
 ```
 
 `top_merchants`:
@@ -1316,13 +1329,18 @@ do not resubmit the create; submit an update on that mapping_id instead.
 
 Domain quirks you must respect:
 - Raw values are matched trimmed + lowercased.
-- Category precedence is account+merchant → account → global+merchant → global,
-  so a proposed global rule can be shadowed by an existing account rule
-  (check shadowed_by_existing).
+- Category and transaction_type precedence is account+merchant → account →
+  global+merchant → global, so a proposed global rule can be shadowed by an
+  existing account rule (check shadowed_by_existing). merchant is valid on
+  category and transaction_type only. Type merchant scope also matches a
+  space-bounded prefix (merchant=western union hits "western union capture…").
+  Merchant kind raw_value uses the same prefix: one "western union" alias
+  covers "western union capture 623… web id: …" — do not create one rule
+  per capture id.
 - Transaction overrides write `Transaction.category_override`; preview reports them under
   `overrides`, not under the rule-impact list.
-- Reclassify never touches category_override or merchant_override.
-- Transaction type is recalculated only for rows with raw_type.
+- Reclassify never touches category_override, merchant_override, or type_override.
+- Transaction type is always recalculated on reclassify (lookup if raw_type, else sign+account_kind when sign_convention is set). Type mapping ops still only impact rows with raw_type.
 - Owner is recalculated only for rows with owner_raw.
 ```
 
@@ -1423,7 +1441,7 @@ You are the conversational entrypoint for a personal finance ledger.
 Resolve people and account names to ids (list_owners, list_accounts) and relative dates such as "last month" to concrete YYYY-MM-DD ranges *before* delegating. Put those ids and dates in the task text; subagents do not see this conversation.
 A current calendar date is attached to each turn; use it to resolve relative dates. Never guess the calendar. Do not treat that date as something the user said or confirmed.
 
-Answer single-number questions (a total, one summary) yourself with get_total or summarize.
+Answer total questions with get_total (`spend` = purchases − refunds; `net_cash_flow`). Use summarize or get_cash_flow when those fit better.
 Delegate multi-step analysis (comparisons, trends, top merchants, unusual transactions, description search) to ask_analyst.
 Delegate anything touching mappings, unmapped values, or overrides to run_data_steward.
 When delegating mapping work, include any account, kind (type, category, owner, or merchant), or merchant scope the user asked for in the task text.
@@ -1477,7 +1495,7 @@ Report only what the evidence states. If product_type is present, name it exactl
 ```
 You clean up normalization mappings.
 Workflow: fetch unmapped values → list_mappings for the kind (global, plus the account scope if relevant) → inspect examples → propose ops → always preview before submitting → submit the plan with the preview attached.
-Rules may be global or scoped to an account; category rules may also be scoped to a merchant. Propose ops and submit plans that match the scope the user requested.
+Rules may be global or scoped to an account; category and transaction_type rules may also be scoped to a merchant. Propose ops and submit plans that match the scope the user requested. For a merchant-only type change (e.g. Western Union MISC_DEBIT → TRANSFER on one Chase account), create a transaction_type rule with that account_id and merchant — do not remap the raw type globally. Merchant aliases use space-bounded prefix on raw_value: one "western union" → "Western Union" rule covers every CAPTURE/WEB ID variant. Never create one merchant rule per unique ACH string.
 Never claim anything was applied; applying happens only after a human approves.
 
 If preview reports conflicts_with_existing_id, submit an update on that mapping_id — never resubmit the create. Collapsing near-duplicate canonicals (e.g. Grocery/Groceries) is an update on the existing rule plus creates for other raw keys.
@@ -1727,22 +1745,26 @@ Stable id `INV-nn` is the citation key. Every row below is **[T]** (named test e
 | Id | Statement | Why | Enforced | Test |
 |---|---|---|---|---|
 | INV-19 | Reclassify never writes overrides / raw columns (except `merchant_raw` backfill when empty). | Preserve import + user fixes | `run_reclassification` | `test_reclassify_applies_new_type_and_category_mappings`, `test_reclassify_backfills_merchant_from_description` |
-| INV-20 | Type/owner recompute gated on `raw_type` / `owner_raw`. | Sign-derived and default-owner rows stay | `run_reclassification`; `_rule_in_scope` | `test_preview_gates` |
-| INV-21 | `spend_only` totals use `abs(amount)` and SPEND only. | Mixed-sign CSVs | `_amount_expr`, `_apply_filters` | `test_spend_only_excludes_payments_and_refunds`, `test_mixed_sign_spends_use_abs` |
+| INV-20 | Reclassify always recomputes `transaction_type` via resolver; `type_override` never written. Preview type **ops** still gated on `raw_type`. Owner gated on `owner_raw`. | Sign-only paychecks pick up INCOME after PAYMENT split | `run_reclassification`; `_rule_in_scope` | `test_preview_gates`, `test_reclassify_sign_only_paycheck_becomes_income` |
+| INV-21 | `spend_only` totals use `abs(amount)` and effective type `SPEND` (`type_override` wins). | Override hides row from spend analytics | `_amount_expr`, `_apply_filters`, `effective_type` | `test_spend_only_excludes_payments_and_refunds`, `test_mixed_sign_spends_use_abs`, `test_spend_analytics_respects_type_override` |
 | INV-22 | Effective category/merchant coalesce override > normalized > raw. | Analytics + list filters | SQL case + `resolved_merchant` | `test_summarize_category_coalesce_override_wins`, `test_merchant_filter_and_group_by_use_effective_value` |
-| INV-23 | Dedupe identity is account+date+quantized amount+description; within-batch too. | Monthly re-import | `compute_dedupe_hash`, `split_new_and_duplicates` | `tests/domain/test_dedupe.py::*` |
+| INV-23 | Dedupe identity is account+date+quantized amount+description; within-batch too. `allow_duplicates` suffixes `occ=N`. | Monthly re-import | `assign_dedupe_hashes`, `split_new_and_duplicates` | `tests/domain/test_dedupe.py::*` |
 | INV-24 | Raw mapping keys stored cleaned; lookup uses cleaned keys. | `" Sale "` hits `sale` | `clean_raw_value` | `test_create_mapping_cleans_raw_value_and_collapses_duplicates`, `test_classify_transaction_type_uses_cleaned_raw_value` |
 | INV-25 | Same-scope overlay loses to `db:`. | Preview shadowing | `MergedNormalizationLookup` | `test_same_scope_prefers_db_rule` |
 | INV-26 | `search` is not spend_only but still `date_to=today`. | Shared `_apply_filters` | `search_transactions` | `test_search_is_case_insensitive_and_includes_all_types` |
 | INV-27 | Identity merchant map not required to filter/group by raw merchant. | Unmapped merchants queryable | `effective_merchant` fallback | `test_identity_merchant_map_not_required` |
 | INV-28 | `resolve_mapping` ignores per-import override. | Placeholder | `resolve_mapping` | `test_resolve_mapping_ignores_override_for_now` |
-| INV-29 | Delete type mapping previews UNKNOWN. | Fallback | preview delete | `test_preview_delete_type_reverts_to_unknown` |
+| INV-29 | Delete type mapping previews resolver fallback (sign+kind if `sign_convention` else UNKNOWN). | Type-col-only accounts preview UNKNOWN; sign accounts preview sign-derived type | preview delete | `test_preview_delete_type_reverts_to_unknown`, `test_preview_delete_type_uses_sign_fallback` |
 | INV-30 | Execute summaries carry ApplyResult numbers verbatim. | Coordinator must not paraphrase | `execute` summary | `test_steward_conflict_then_update_create_reports_counts`, `test_steward_noop_apply_reports_reclass_updated_zero` |
 | INV-31 | Preview output for rule-only plans is unchanged except for additive `overrides=[]`. | Existing consumers | `preview_mappings` | `test_rule_only_preview_keeps_existing_shape_plus_empty_overrides` |
 | INV-32 | Invalid preview ops are skipped; invalid apply aborts all. | Preview is advisory | `parse_plan_ops` vs apply | `test_preview_validation_excludes_invalid_and_continues`, `test_apply_rejects_invalid_plan` |
 | INV-33 | Canonical-diff identity collisions are conflicts, rejected on apply. | No silent overwrite | `_conflict_errors` | `test_apply_rejects_conflict_and_missing_id`, `test_preview_conflict_split` |
 | INV-34 | Approved plans re-apply idempotently (dup create skip, missing delete skip, conflict still rejected). | Resume / double submit | `apply_mapping_plan` | `test_apply_idempotent`, `test_apply_mixed_plan_atomic_and_reapply` |
 | INV-35 | `preview_mappings` is pure. | Agent can preview freely | no session dirty | `test_preview_is_pure` |
+
+| INV-48 | Stored `is_spend` equals `effective_type == SPEND` after ingest, reclassify, and PATCH. | `list_unmatched` / CLI enrich filter `is_spend`, not `effective_type` | ingest, reclassify, PATCH | `test_type_override_flips_is_spend_and_drops_unmatched` |
+| INV-49 | `merchant` is allowed on category and transaction_type mappings; owner/merchant kinds reject it. Type lookup uses the same account+merchant precedence as category, plus a space-bounded prefix on the resolved merchant. | Chase WU `MISC_DEBIT` → TRANSFER without remapping rent | `allows_merchant_scope`, `merchant_scope_matches` | `test_transaction_type_mapping_merchant_scope`, `test_normalize_type_uses_resolved_merchant`, `test_reclassify_type_uses_merchant_scope`, `test_preview_type_merchant_scope_only_hits_matching_merchant` |
+| INV-50 | Merchant-kind `raw_value` matches exact or space-bounded prefix (longest prefix wins; account then global). | One `western union` alias covers every CAPTURE id | `allows_raw_prefix`, `space_bounded_prefix_match` | `test_merchant_kind_raw_value_prefix`, `test_classify_merchant_uses_raw_value_prefix`, `test_merchant_mapping_raw_value_prefix`, `test_preview_merchant_raw_prefix_covers_variants` |
 
 ### Privacy and scope
 
@@ -2051,6 +2073,10 @@ Verified against code:
 28. **Extraction describes; it does not classify.** The original `EXTRACTION_SYSTEM_PROMPT` offered `known_categories` in the human message and told the model to pick `category_hint` from that list. Live runs then coarsened product-level detail into the bank's taxonomy (a television becoming "Shopping"). The prompt no longer includes the list. `LineItem.product_type` is a specific free-form product kind; `category_hint` is the model's own short category. `known_categories` is still loaded and consumed by `snap_category` so `dominant_category` is a stored canonical or `"unknown"`; `dominant_category_raw` stores the hint verbatim.
 29. **Match confidence comes from evidence, not model self-report.** The original `match_receipt` formula was `min(1.0, raw_confidence + 0.2)` for `exact_total` and `raw_confidence * 0.8` for `split_partial`, so a model that extracted a matching total but self-scored `raw_confidence=0.0` produced 0.2 and failed the 0.8 threshold — an arithmetic match vetoed by self-confidence. `exact_total` is now base 0.9 (+0.1 if `order_id` is present, cap 1.0); `split_partial` is base 0.7 (+0.1 if `order_id`); only `date_only` still scales by `raw_confidence` (0.4×), because there the model's read is all we have. `ModelReceiptExtractor` binds temperature 0 and rewrites `raw_confidence` of exactly 0.0 with a non-null total to 0.5 (the model contradicting itself).
 30. **Hint-path learning stores the retrieval phrase, not the payee.** A learned `merchant_senders` row keyed on the full payee (`best buy 1234 westheimer rd houston tx`) would not tolerant-match the next variant of the same merchant. On the hint path, `learn_sender` now stores the hint phrase used for retrieval (e.g. `best buy`). Existing learned rows are not migrated. Non-hint learning is unchanged.
+
+30. **`account_kind` is required on create and not inferred from `type_col`.** Chase **checking** CSVs include a Type column (`ACH_CREDIT`, `LOAN_PMT`, …); inferring `credit_card` from `type_col` would mis-kind them. Backfill in `init_db` is a one-off guess (`type_col` set → card, else depository). Fix via SQL + reclassify (see QA.md). No `PATCH /accounts` for kind this round.
+31. **Checking card payments stay SPEND on sign-only imports** until an account-scoped `loan_pmt`→`TRANSFER` rule or `type_override`. Default seeds omit `loan_pmt` because Chase uses it for mortgage/auto too. Card-side `Payment` maps to TRANSFER via kind-scoped seed.
+32. **Cash-flow `net` excludes transfers and `other`.** ADJUSTMENT rows (e.g. live `fee`→ADJUSTMENT) land in `other`; retarget `fee`→`FEE` to fold into `net` fees bucket.
 
 ### Doc vs code discrepancy list (ground rule 1)
 

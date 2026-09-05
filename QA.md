@@ -62,6 +62,7 @@ Skim 5 rows: note distinct `Type` values (`Sale` / `Return` / `Payment` vs `Purc
   "name": "Chase",
   "last4": "XXXX",
   "default_owner_id": 1,
+  "account_kind": "credit_card",
   "default_mapping": {
     "date_col": "Transaction Date",
     "description_col": "Description",
@@ -72,16 +73,76 @@ Skim 5 rows: note distinct `Type` values (`Sale` / `Return` / `Payment` vs `Purc
 }
 ```
 
-**Apple account** — same, plus `"owner_col": "Purchased By"` and `amount_col` matching the file (`Amount (USD)` if that is the header).
+**Apple account** — same, plus `"account_kind": "credit_card"`, `"owner_col": "Purchased By"`, and `amount_col` matching the file (`Amount (USD)` if that is the header).
 
-**Type mappings** — `POST /mappings` (global):
+**Checking (sign-only)** — `"account_kind": "depository"` and mapping without `type_col`:
+
+```json
+{
+  "name": "Checking",
+  "last4": "XXXX",
+  "default_owner_id": 1,
+  "account_kind": "depository",
+  "default_mapping": {
+    "date_col": "Date",
+    "description_col": "Description",
+    "amount_col": "Amount",
+    "sign_convention": "negative_is_spend"
+  }
+}
+```
+
+Kind-scoped type seeds are inserted on account create (`payment`→`TRANSFER` on cards, `ach_credit`→`INCOME` on depository, etc.). You usually **do not** need to POST those identities manually.
+
+**Optional manual rule (checking card-pay):** if your checking export uses `LOAN_PMT` for card payments and you want them out of spend totals / into transfers:
+
+```json
+{
+  "kind": "transaction_type",
+  "raw_value": "loan_pmt",
+  "canonical_value": "TRANSFER",
+  "account_id": "<checking_account_id>"
+}
+```
+
+Not seeded by default — Chase also uses `LOAN_PMT` for mortgage/auto.
+
+**Merchant-scoped type rule (checking remittances):** Western Union (and similar) often arrives as `MISC_DEBIT` / SPEND. Scope TRANSFER to that merchant so rent and insurance stay spend:
+
+```json
+{
+  "kind": "transaction_type",
+  "raw_value": "misc_debit",
+  "canonical_value": "TRANSFER",
+  "account_id": "<checking_account_id>",
+  "merchant": "Western Union"
+}
+```
+
+`merchant` matches the resolved label exactly, or as a leading prefix (`WESTERN UNION CAPTURE 623…` hits `western union`). Then `POST /transactions/reclassify?account_id=…`.
+
+Do **not** create one merchant alias per capture id. One prefix alias is enough:
+
+```json
+{
+  "kind": "merchant",
+  "raw_value": "western union",
+  "canonical_value": "Western Union",
+  "account_id": "<checking_account_id>"
+}
+```
+
+Same prefix applies to Marshalls-style store-number suffixes (`marshalls` hits `marshalls #59 …`).
+
+**Type mappings** — `POST /mappings` only for values **not** covered by seeds (global):
 
 | raw_value | canonical_value |
 |---|---|
 | Sale | SPEND |
 | Purchase | SPEND |
 | Return | REFUND |
-| Payment | PAYMENT |
+
+Do **not** POST `Payment` → `PAYMENT` (rejected). Card payments are `TRANSFER` via account seed; paychecks on sign-only checking are `INCOME`.
 
 Add any other Type you saw in step 0 (`Adjustment`, `Fee`, …).
 
@@ -125,7 +186,8 @@ Already-imported rows do not pick up new rules by themselves. After adding mappi
 `GET /transactions?account_id={chase_id}`
 
 - A `Sale` / `Purchase` is `transaction_type=SPEND`, `is_spend=true`
-- A payment is `PAYMENT`, `is_spend=false`
+- A card `Payment` is `TRANSFER`, `is_spend=false`
+- Sign-only paycheck credits are `INCOME`, `is_spend=false`
 - `category_raw` matches the file; `category_normalized` is set only if you mapped it
 - Chase rows use the default owner
 - Apple rows with `Purchased By` have the right `owner_id`
@@ -146,11 +208,21 @@ All of these default to `spend_only=true` except search.
 | `GET /analytics/by-owner` | Chase default owner + Apple people; no silent drop (nulls show as `(unassigned)`) |
 | `GET /analytics/by-month` | `YYYY-MM` buckets, chronological |
 | `GET /analytics/summary?group_by=account` | Chase vs Apple totals |
-| `GET /analytics/total` | `count` ≈ number of SPEND rows you imported |
+| `GET /analytics/total` | `spend` = purchases − refunds; `net_cash_flow` = income + refunds − purchases − fees |
 | `GET /analytics/top-merchants?limit=10` | Descriptions you recognize |
 | `GET /analytics/largest?limit=5` | Biggest **absolute** spends, not a large payment |
 | `GET /analytics/search?query=` | A merchant fragment; refunds/payments **do** appear |
 | `GET /analytics/unmapped` | Shrinks after you added rules; leftover is the real worklist |
+| `GET /analytics/cash-flow` | Buckets by effective type; `other` holds ADJUSTMENT/UNKNOWN; `net` excludes transfers and `other` |
+
+**Fix mis-kinded account (SQL + reclassify):**
+
+```sql
+UPDATE accounts SET account_kind = 'depository' WHERE id = <checking_id>;
+-- or 'credit_card' for card accounts
+```
+
+Then `POST /transactions/reclassify?account_id=<id>`.
 
 Filter one call with `account_id` and one with `date_from` / `date_to` for a month you know is in the file.
 

@@ -190,7 +190,7 @@ If instead the design writes to `Transaction.category_override` directly, no SQL
 
 **Verdict: Holds.**
 
-- `app/domain/classification.py::TransactionType(str, Enum)` — `SPEND`, `REFUND`, `PAYMENT`, `ADJUSTMENT`, `UNKNOWN`.
+- `app/domain/classification.py::TransactionType(str, Enum)` — `SPEND`, `INCOME`, `TRANSFER`, `REFUND`, `FEE`, `ADJUSTMENT`, `UNKNOWN` (legacy `PAYMENT` retained for migrated rows only).
 - `app/domain/classification.py::NormalizationKind(str, Enum)` — `transaction_type`, `category`, `owner`, `merchant`.
 - `app/domain/mapping.py::SignConvention(str, Enum)` — `negative_is_spend`, `positive_is_spend`.
 
