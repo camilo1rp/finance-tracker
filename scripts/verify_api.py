@@ -609,19 +609,31 @@ def run(client, suffix: str, report: Report) -> None:
 
     largest = client.get("/analytics/largest", params={"limit": 5})
     if report.expect_status("GET /analytics/largest", largest, 200):
-        if largest.json():
-            first = Decimal(str(largest.json()[0]["amount"]))
+        body = largest.json()
+        if body.get("transactions"):
+            first = Decimal(str(body["transactions"][0]["amount"]))
             report.expect_eq(
                 "largest first row is max abs amount",
                 abs(first) >= Decimal("54.32"),
                 True,
             )
+        totals = body.get("totals", {})
+        if totals:
+            purchases = Decimal(str(totals.get("purchases", "0")))
+            refunds = Decimal(str(totals.get("refunds", "0")))
+            spend = Decimal(str(totals.get("spend", "0")))
+            report.expect_eq(
+                "largest totals spend equals purchases minus refunds",
+                spend,
+                (purchases - refunds).quantize(Decimal("0.01")),
+            )
 
     search = client.get("/analytics/search", params={"query": "amazon"})
     if report.expect_status("GET /analytics/search?query=amazon", search, 200):
-        descs = {row["description"] for row in search.json()}
+        body = search.json()
+        descs = {row["description"] for row in body.get("transactions", [])}
         report.expect_in("search finds AMAZON MARKETPLACE", "AMAZON MARKETPLACE", descs)
-        types = {row["transaction_type"] for row in search.json()}
+        types = {row["transaction_type"] for row in body.get("transactions", [])}
         report.expect_in("search includes REFUND", "REFUND", types)
 
     unmapped = client.get("/analytics/unmapped")

@@ -293,32 +293,13 @@ class TransactionPatch(BaseModel):
     type_override: Optional[str] = None
 
 
-class CashFlowOut(BaseModel):
-    spend: Decimal
-    income: Decimal
-    refunds: Decimal
-    fees: Decimal
-    transfers: Decimal
-    other: Decimal
-    net: Decimal
-    other_count: int
-
-
-# ---- Analytics ----
-
-class GroupSummary(BaseModel):
-    group_value: str
-    total: Decimal
-    count: int
-
-
 class TypeTotalOut(BaseModel):
     transaction_type: str
     total: Decimal
     count: int
 
 
-class TotalOut(BaseModel):
+class TotalsBreakdown(BaseModel):
     by_type: list[TypeTotalOut]
     purchases: Decimal
     refunds: Decimal
@@ -330,7 +311,26 @@ class TotalOut(BaseModel):
     sign_convention: Optional[str] = None
 
 
-class MerchantSummary(BaseModel):
+class TotalOut(TotalsBreakdown):
+    pass
+
+
+class GroupSummary(TotalsBreakdown):
+    group_value: str
+
+
+class MerchantSummary(TotalsBreakdown):
     merchant: str
-    total: Decimal
-    count: int
+
+
+class CashFlowOut(TotalsBreakdown):
+    income: Decimal
+    fees: Decimal
+    transfers: Decimal
+    other: Decimal
+    other_count: int
+
+
+class TransactionListOut(BaseModel):
+    totals: TotalOut
+    transactions: list[TransactionOut]

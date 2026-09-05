@@ -526,7 +526,7 @@ erDiagram
 
 App: `app/main.py::create_app` (title `"Family Finance Tracker"`). All routers use `Depends(app/database.py::get_session)` — session closed after request; **commit is the callee's job** (router or service). Pydantic/query validation → **422** (FastAPI). Status `HTTP_422_UNPROCESSABLE_CONTENT` is used for domain 422s. Unmarked HTTP contract claims are **[C]**; a named test is **[T]**.
 
-Shared analytics query params (unless noted): `date_from: date | None = None`, `date_to: date | None = None`, `account_id: int | None = None`, `owner_id: int | None = None`, `merchant: str | None = None`, `spend_only: bool = True`. Service layer **always** upper-bounds `transaction_date` at `date.today()` when `date_to` is omitted (`app/services/analytics_service.py::_resolved_date_to` via `_apply_filters`). `merchant` matches **effective_merchant**. There is **no category filter** on analytics.
+Shared analytics query params (unless noted): `date_from: date | None = None`, `date_to: date | None = None`, `account_id: int | None = None`, `owner_id: int | None = None`, `merchant: str | None = None`, optional `transaction_type`. Service layer **always** upper-bounds `transaction_date` at `date.today()` when `date_to` is omitted (`app/services/analytics_service.py::_resolved_date_to` via `_apply_filters`). All endpoints return full type breakdown; use `spend` for net spending. `merchant` matches **effective_merchant**. There is **no category filter** on analytics.
 
 ### 4.1 `app/main.py`
 
@@ -575,7 +575,7 @@ Shared analytics query params (unless noted): `date_from: date | None = None`, `
 
 ### 4.7 `app/routers/analytics.py` (9)
 
-All except `/unmapped` and `/search` default `spend_only=True`. All except `/unmapped` go through `_apply_filters` → **`date_to` defaults to today**. `spend_only` filters `transaction_type == SPEND` and sums `abs(amount)`.
+All except `/unmapped` go through `_apply_filters` → **`date_to` defaults to today**. Optional `transaction_type` filters list endpoints; aggregates always include all types in the breakdown.
 
 | Method | Path | Extra params | Response | Delegates |
 |---|---|---|---|---|
@@ -585,8 +585,9 @@ All except `/unmapped` and `/search` default `spend_only=True`. All except `/unm
 | GET | `/analytics/by-month` | — | `list[GroupSummary]` | `summarize(..., "month")` |
 | GET | `/analytics/total` | — | `TotalOut` (`by_type`, purchases, spend, `net_cash_flow`) | `get_total` |
 | GET | `/analytics/top-merchants` | `limit: int = 10` (`ge=1`) | `list[MerchantSummary]` | `top_merchants` |
-| GET | `/analytics/largest` | `limit: int = 10` (`ge=1`) | `list[TransactionOut]` | `largest_transactions` |
-| GET | `/analytics/search` | required `query: str`; `limit: int = 50` (`ge=1`); **no `spend_only`** | `list[TransactionOut]` | `search_transactions` (`spend_only=False`) |
+| GET | `/analytics/largest` | `limit: int = 10` (`ge=1`) | `TransactionListOut` (`totals` + `transactions`) | `largest_transactions` |
+| GET | `/analytics/search` | required `query: str`; `limit: int = 50` (`ge=1`) | `TransactionListOut` | `search_transactions` |
+| GET | `/analytics/cash-flow` | — | `CashFlowOut` (`TotalsBreakdown` + income/fees/transfers/other) | `cash_flow` |
 | GET | `/analytics/unmapped` | none | `UnmappedValuesOut` | `unmapped_summary` |
 
 `by-*` are aliases of `summary` with a fixed `group_by`. Proven: `tests/routers/test_analytics.py::test_by_category_alias_matches_summary`. [T]
@@ -633,10 +634,13 @@ Field lists are **[C]** (read from the Pydantic classes). Behavioral notes that 
 | `TransactionOut` | `id`, `account_id`, `transaction_date`, `description`, `amount`, `transaction_type`, `is_spend`, category triple, `owner_id`, merchant triple | list/patch/largest/search tools. **Omits** `owner_raw`, `raw_type`, `dedupe_hash`, `raw`, `import_batch_id` |
 | `ReclassifyResultOut` | `scanned`, `updated`, `unmapped` | `POST /transactions/reclassify` |
 | `TransactionPatch` | `category_override=None`, `owner_id=None`, `merchant_override=None` | PATCH txn |
-| `GroupSummary` | `group_value`, `total`, `count` | summarize |
-| `TypeTotalOut` | `transaction_type`, `total` (abs), `count` | `TotalOut.by_type` |
-| `TotalOut` | `by_type`, `purchases`, `refunds`, `spend` (purchases−refunds), `net_cash_flow`, `total`, `count`, `average`, `sign_convention` | get_total |
-| `MerchantSummary` | `merchant`, `total`, `count` | top_merchants |
+| `TotalsBreakdown` | `by_type`, `purchases`, `refunds`, `spend` (purchases−refunds), `net_cash_flow`, `total`, `count`, `average`, `sign_convention` | shared analytics totals |
+| `GroupSummary` | `TotalsBreakdown` + `group_value` | summarize |
+| `TypeTotalOut` | `transaction_type`, `total` (abs), `count` | `by_type` rows |
+| `TotalOut` | `TotalsBreakdown` | get_total |
+| `MerchantSummary` | `TotalsBreakdown` + `merchant` | top_merchants |
+| `CashFlowOut` | `TotalsBreakdown` + `income`, `fees`, `transfers`, `other`, `other_count` | cash_flow |
+| `TransactionListOut` | `totals: TotalOut`, `transactions: list[TransactionOut]` | largest, search |
 
 **Discriminated union:** `MappingOp = Annotated[Union[CreateMappingOp, UpdateMappingOp, DeleteMappingOp, SetTransactionCategoryOp, RemoveTransactionOverrideOp], Field(discriminator="op")]`. Parser: `app/schemas.py::parse_mapping_op` (passthrough if already a model; else `TypeAdapter`). **No `rules` field and no alias** on `MappingPlanIn`.
 
@@ -707,21 +711,22 @@ Sign fallback runs only when `mapping.sign_convention` is set and raw type did n
 - `clean_raw_value` — see §3.12. [C]
 - `classify_transaction_type` — empty → UNKNOWN; lookup miss or invalid canonical → UNKNOWN. Cleans merchant then lookup (same as category).
 - `allows_merchant_scope` — category and transaction_type.
-- `merchant_scope_matches` — exact cleaned match; type also accepts space-bounded prefix (`western union` hits `western union capture 623…`).
+- `merchant_scope_matches` — pattern match on cleaned merchant scope (`%` wildcard; no `%` = exact).
+- `pattern_matches` / `has_wildcard` / `pattern_rank_key` / `validate_mapping_pattern` — shared `%` wildcard matcher for all kinds and merchant scope.
 - `classify_category` — empty → None; cleans merchant then lookup.
 - `classify_owner` / `classify_merchant` — empty → None; miss → None (passthrough to raw at display).
 
 ### 6.7 `NormalizationLookup` implementations — precedence
 
-**Category and transaction_type** (both DB and merged): account+merchant → account (merchant NULL) → global+merchant → global. Type merchant scope also accepts a space-bounded prefix. Proven: `tests/domain/test_merged_lookup.py::test_category_precedence_account_merchant_to_global`, `test_transaction_type_precedence_account_merchant_to_global`, `tests/fakes.py::InMemoryNormalizationLookup`, `tests/routers/test_mappings.py::test_category_mapping_merchant_scope`, `test_transaction_type_mapping_merchant_scope`.
+**Category and transaction_type** (both DB and merged): account+merchant → account (merchant NULL) → global+merchant → global. Merchant scope patterns support `%` wildcards. Proven: `tests/domain/test_merged_lookup.py::test_category_precedence_account_merchant_to_global`, `test_transaction_type_precedence_account_merchant_to_global`, `tests/fakes.py::InMemoryNormalizationLookup`, `tests/routers/test_mappings.py::test_category_mapping_merchant_scope`, `test_transaction_type_mapping_merchant_scope`.
 
 **Owner kind:** account (merchant ignored) → global. Proven: `test_owner_and_merchant_kinds_ignore_merchant_scope`.
 
-**Merchant kind:** account then global. After exact miss, space-bounded prefix on `raw_value` (longest prefix wins). `western union` hits `western union capture 623…`. Proven: `test_merchant_kind_raw_value_prefix`, `test_classify_merchant_uses_raw_value_prefix`, `test_merchant_mapping_raw_value_prefix`.
+**Merchant kind:** account then global. Patterns may include `%` wildcards; exact patterns beat wildcards; longer literal text wins among wildcards. `western union%` hits `western union capture 623…`. Proven: `test_merchant_kind_raw_value_wildcard`, `test_classify_merchant_uses_raw_value_wildcard`, `test_merchant_mapping_raw_value_wildcard`.
 
 #### `app/domain/db_lookup.py::DbNormalizationLookup`
 
-`resolve` equality-matches stored cleaned `raw_value` / `merchant` via `_find`. No overlay refs.
+`resolve` pattern-matches stored cleaned `raw_value` / `merchant` at each scope layer. No overlay refs.
 
 `merged_lookup_from_db(db, proposed, kinds) -> MergedNormalizationLookup` — loads DB rows as `RuleSpec(..., ref=f"db:{row.id}")` filtered by `kind IN kinds` (empty `kinds` → all), then concatenates `proposed`.
 
@@ -889,19 +894,19 @@ Order: load Account → `resolve_mapping(mapping_from_stored(...))` → default 
 
 All read-only; no commit.
 
-**`_apply_filters`** — `date_to` → today; optional date_from/account/owner/merchant; optional `transaction_type` (filters **`effective_type`**, ignores `spend_only`); else `spend_only=True` → **`effective_type == SPEND`**.
+**`_apply_filters`** — `date_to` → today; optional date_from/account/owner/merchant; optional `transaction_type` filters list queries by **`effective_type`**.
 
-**`cash_flow(...)`** — `{spend, income, refunds, fees, transfers, other, net, other_count}` by effective type (`abs(amount)`). `net = income + refunds − spend − fees`; excludes `transfers` and `other` (ADJUSTMENT, UNKNOWN). Household `net` can double-count card spend vs checking card-pay until account-scoped `loan_pmt` rule or `type_override`. Proven: `tests/routers/test_cash_flow.py`.
+**`cash_flow(...)`** — `TotalsBreakdown` plus `{income, fees, transfers, other, other_count}` from one `_totals_by_type` query. `spend` = purchases − refunds; `net_cash_flow` = income + refunds − purchases − fees (matches `get_total`). Proven: `tests/routers/test_cash_flow.py`.
 
-**`summarize(db, date_from, date_to, account_id, owner_id, group_by, spend_only=True, merchant=None) -> list[dict]`** — keys: category=`coalesce(effective_category, "(unassigned)")`; owner=`coalesce(Owner.name, "(unassigned)")`; account=`Account.name`; month=`YYYY-MM` (`strftime` sqlite / `to_char` else); merchant=`coalesce(effective_merchant, "(unassigned)")`. Month ordered by key; others `total desc, key`. `UNASSIGNED = "(unassigned)"`.
+**`summarize(...)`** — one `GROUP BY (key, effective_type)` query per `group_by`; each row is `_derive_totals` (same fields as `get_total`) plus `group_value`. Month ordered by key; others `spend desc, key`. `UNASSIGNED = "(unassigned)"`.
 
-**`get_total(...)`** — `by_type` is abs magnitudes per effective type. Type `SPEND` = purchases. `purchases`/`refunds` those buckets; `spend`/`total` = purchases − refunds; `net_cash_flow` = income + refunds − purchases − fees (same as `cash_flow.net`); `count`/`average` over purchase rows unless `transaction_type` is set. `sign_convention` when `account_id` is set.
+**`get_total(...)`** — `_totals_by_type` + `_derive_totals`. Type `SPEND` = purchases. `spend`/`total` = purchases − refunds unless `transaction_type` set; `net_cash_flow` = income + refunds − purchases − fees; `sign_convention` when `account_id` is set.
 
-**`top_merchants(..., limit=10, merchant=None)`** — group effective merchant, limit.
+**`top_merchants(..., limit=10, merchant=None)`** — merchant grouping via `_totals_by_type` + `_derive_totals`; sorted by `spend` desc; limit in Python.
 
-**`largest_transactions(...)`** — order `abs(amount) desc, id`, limit.
+**`largest_transactions(...)`** — `{totals, transactions}`. List: order `abs(amount) desc, id`, limit; optional `transaction_type`. `totals`: `_derive_totals` over full filter window (all types).
 
-**`search_transactions(..., query, limit=50, merchant=None)`** — `_apply_filters(..., spend_only=False)` so **still date_to=today**; `description ILIKE %query%`; order date, id.
+**`search_transactions(..., query, limit=50, merchant=None)`** — `{totals, transactions}`. List + `totals` use description `ILIKE` over all matching rows (list capped at `limit`).
 
 **`unmapped_summary(db) -> dict[str, list[str]]`** — distinct: UNKNOWN+raw_type; category_raw with **both** override and normalized NULL; owner_raw with owner_id NULL; merchant_raw with **both** override and normalized NULL.
 
@@ -1174,10 +1179,10 @@ Classification (same scheme as §0): **read-only** = no DB write and no graph-st
 | `list_mappings` | `kind=None`, `account_id=None` | select NormalizationMapping | read | `app/agent/tools/read.py::list_mappings` |
 | `list_transactions` | `account_id`, `owner_id`, `category`, `merchant`, `date_from`, `date_to`, `limit=25` | inline select (not `_apply_filters`) | read | `app/agent/tools/read.py::list_transactions` |
 | `search_transactions` | `query`, `account_id`, `owner_id`, `date_from`, `date_to`, `merchant`, `limit=25` | `app/services/analytics_service.py::search_transactions` | read | `app/agent/tools/read.py::search_transactions_tool` |
-| `summarize` | `group_by`, dates, `account_id`, `owner_id`, `spend_only=True`, `merchant` | `app/services/analytics_service.py::summarize` | read | `app/agent/tools/read.py::summarize` |
-| `get_total` | dates, ids, `spend_only=True`, `merchant` | `app/services/analytics_service.py::get_total` | read | `app/agent/tools/read.py::get_total` |
-| `top_merchants` | `limit=10`, dates, ids, `spend_only=True`, `merchant` | `app/services/analytics_service.py::top_merchants` | read | `app/agent/tools/read.py::top_merchants` |
-| `largest_transactions` | `limit=10`, dates, ids, `spend_only=True`, `merchant` | `app/services/analytics_service.py::largest_transactions` | read | `app/agent/tools/read.py::largest_transactions` |
+| `summarize` | `group_by`, dates, `account_id`, `owner_id`, `merchant`, optional `transaction_type` | `app/services/analytics_service.py::summarize` | read | `app/agent/tools/read.py::summarize` |
+| `get_total` | dates, ids, `merchant`, optional `transaction_type` | `app/services/analytics_service.py::get_total` | read | `app/agent/tools/read.py::get_total` |
+| `top_merchants` | `limit=10`, dates, ids, `merchant`, optional `transaction_type` | `app/services/analytics_service.py::top_merchants` | read | `app/agent/tools/read.py::top_merchants` |
+| `largest_transactions` | `limit=10`, dates, ids, `merchant`, optional `transaction_type` | `app/services/analytics_service.py::largest_transactions` | read | `app/agent/tools/read.py::largest_transactions` |
 
 Lists: `READ_TOOLS` (first six), `ANALYTICS_TOOLS` (last four), `ANALYST_TOOLS` = owners, accounts, list_transactions, search, + analytics.
 
@@ -1252,7 +1257,7 @@ and once without (global rules).
 ```
 List stored transactions.
 
-Does not apply spend_only and does not default date_to.
+Does not default date_to.
 category/merchant filters match the effective value
 (override → normalized → raw). limit must be >= 1.
 ```
@@ -1262,25 +1267,21 @@ category/merchant filters match the effective value
 ```
 Search transaction descriptions (case-insensitive substring).
 
-Does not apply spend_only. The analytics service still upper-bounds
-transaction_date at today when date_to is omitted.
-merchant matches the effective value (override → normalized → raw).
-limit must be >= 1.
+Search transaction descriptions (case-insensitive substring).
+
+Returns {totals, transactions}. date_to defaults to today when omitted.
+merchant matches the effective value. limit must be >= 1.
 ```
 
 `summarize`:
 
 ```
-Group transaction totals.
+Group transaction totals with get_total breakdown per bucket.
 
 group_by is category, owner, month, account, or merchant.
-Month buckets are YYYY-MM, ascending; other groupings sort by total desc.
-"(unassigned)" is the bucket for missing groups.
-Defaults: spend_only=true (only SPEND rows; totals use abs(amount)) and
-date_to=today. spend_only=false sums signed amounts as stored.
-merchant matches the effective value (override → normalized → raw).
-Amounts are decimal strings. There is no category filter; group_by=category
-to break down by category.
+Each row includes purchases, refunds, spend, net_cash_flow, by_type.
+Month buckets YYYY-MM ascending; others sort by spend desc.
+date_to defaults to today. Optional transaction_type changes headline total/count.
 ```
 
 `get_total`:
@@ -1293,21 +1294,19 @@ Return per-type magnitudes, net spending (purchases − refunds), and net_cash_f
 `top_merchants`:
 
 ```
-Top merchants by total.
+Top merchants by net spend with get_total breakdown per row.
 
-Defaults: spend_only=true (only SPEND rows; totals use abs(amount)),
-date_to=today, limit=10. spend_only=false sums signed amounts as stored.
-merchant matches the effective value. Amounts are decimal strings.
+date_to defaults to today, limit=10. Optional transaction_type filter.
 limit must be >= 1.
 ```
 
 `largest_transactions`:
 
 ```
-Largest transactions by absolute amount.
+Largest transactions by absolute amount with filter-scoped totals.
 
-Defaults: spend_only=true (only SPEND rows), date_to=today, limit=10.
-Does not default to a category filter. limit must be >= 1.
+Returns {totals, transactions}. date_to defaults to today, limit=10.
+Optional transaction_type filters the list. limit must be >= 1.
 ```
 
 `preview_mapping_rules` (`app/agent/tools/steward.py::_PREVIEW_DESCRIPTION`):
@@ -1329,13 +1328,13 @@ do not resubmit the create; submit an update on that mapping_id instead.
 
 Domain quirks you must respect:
 - Raw values are matched trimmed + lowercased.
+- Patterns without `%` are exact matches. `%` matches any sequence (e.g. `western union%`, `%starbucks%`).
 - Category and transaction_type precedence is account+merchant → account →
   global+merchant → global, so a proposed global rule can be shadowed by an
   existing account rule (check shadowed_by_existing). merchant is valid on
-  category and transaction_type only. Type merchant scope also matches a
-  space-bounded prefix (merchant=western union hits "western union capture…").
-  Merchant kind raw_value uses the same prefix: one "western union" alias
-  covers "western union capture 623… web id: …" — do not create one rule
+  category and transaction_type only; merchant scope patterns also support `%`.
+  Merchant kind raw_value uses the same wildcard rules: one `western union%`
+  alias covers "western union capture 623… web id: …" — do not create one rule
   per capture id.
 - Transaction overrides write `Transaction.category_override`; preview reports them under
   `overrides`, not under the rule-impact list.
@@ -1458,7 +1457,7 @@ Questions about what a purchase was, or requests to enrich or research transacti
 You answer analysis questions over a personal transaction ledger.
 Comparisons take multiple tool calls (two summarize calls with different date ranges, or one group_by=month); compute deltas yourself.
 Report only numbers that appear in tool results — never estimate.
-State the filters you used (dates, owner, account, spend_only) in the answer.
+State the filters you used (dates, owner, account) in the answer.
 Amounts are decimal strings.
 The task text should already contain resolved owner/account ids and concrete YYYY-MM-DD ranges; use list_owners/list_accounts only to confirm.
 A current calendar date is attached to each turn; use it if a task still uses relative dates. Do not treat that date as something the user said or confirmed.
@@ -1481,7 +1480,7 @@ Prefer existing categories. When you propose a new category, say so in the narra
 
 Put anything uncertain in unresolved with a reason (below_threshold, no_evidence, unknown_transaction, evidence_mismatch, source_unavailable, ambiguous) rather than guessing.
 
-When evidence shows a merchant is always one category, add a merchant_rule_suggestions create op instead of many per-transaction overrides.
+When evidence shows a merchant is always one category, add a merchant_rule_suggestions create op instead of many per-transaction overrides. Use `%` wildcards in raw_value when payee strings vary (e.g. `amazon%` or `%amazon%`); no `%` is exact match.
 
 Finish by calling submit_recommendation exactly once.
 
@@ -1495,7 +1494,7 @@ Report only what the evidence states. If product_type is present, name it exactl
 ```
 You clean up normalization mappings.
 Workflow: fetch unmapped values → list_mappings for the kind (global, plus the account scope if relevant) → inspect examples → propose ops → always preview before submitting → submit the plan with the preview attached.
-Rules may be global or scoped to an account; category and transaction_type rules may also be scoped to a merchant. Propose ops and submit plans that match the scope the user requested. For a merchant-only type change (e.g. Western Union MISC_DEBIT → TRANSFER on one Chase account), create a transaction_type rule with that account_id and merchant — do not remap the raw type globally. Merchant aliases use space-bounded prefix on raw_value: one "western union" → "Western Union" rule covers every CAPTURE/WEB ID variant. Never create one merchant rule per unique ACH string.
+Rules may be global or scoped to an account; category and transaction_type rules may also be scoped to a merchant. Propose ops and submit plans that match the scope the user requested. For a merchant-only type change (e.g. Western Union MISC_DEBIT → TRANSFER on one Chase account), create a transaction_type rule with that account_id and merchant — do not remap the raw type globally. Mapping patterns use `%` as a wildcard for any sequence; no `%` means exact match after trim+lowercase. Use `value%`, `%value`, or `%value%` to cover payee variants (e.g. `western union%` → "Western Union" for every CAPTURE/WEB ID string). Same `%` syntax applies to merchant scope. Never create one merchant rule per unique ACH string.
 Never claim anything was applied; applying happens only after a human approves.
 
 If preview reports conflicts_with_existing_id, submit an update on that mapping_id — never resubmit the create. Collapsing near-duplicate canonicals (e.g. Grocery/Groceries) is an update on the existing rule plus creates for other raw keys.
@@ -1746,12 +1745,12 @@ Stable id `INV-nn` is the citation key. Every row below is **[T]** (named test e
 |---|---|---|---|---|
 | INV-19 | Reclassify never writes overrides / raw columns (except `merchant_raw` backfill when empty). | Preserve import + user fixes | `run_reclassification` | `test_reclassify_applies_new_type_and_category_mappings`, `test_reclassify_backfills_merchant_from_description` |
 | INV-20 | Reclassify always recomputes `transaction_type` via resolver; `type_override` never written. Preview type **ops** still gated on `raw_type`. Owner gated on `owner_raw`. | Sign-only paychecks pick up INCOME after PAYMENT split | `run_reclassification`; `_rule_in_scope` | `test_preview_gates`, `test_reclassify_sign_only_paycheck_becomes_income` |
-| INV-21 | `spend_only` totals use `abs(amount)` and effective type `SPEND` (`type_override` wins). | Override hides row from spend analytics | `_amount_expr`, `_apply_filters`, `effective_type` | `test_spend_only_excludes_payments_and_refunds`, `test_mixed_sign_spends_use_abs`, `test_spend_analytics_respects_type_override` |
+| INV-21 | Analytics totals use abs(amount) per effective type; `spend` = purchases − refunds. | Override moves row between type buckets | `_derive_totals`, `effective_type` | `test_total_breakdown_includes_all_types`, `test_mixed_sign_spends_use_abs`, `test_spend_analytics_respects_type_override` |
 | INV-22 | Effective category/merchant coalesce override > normalized > raw. | Analytics + list filters | SQL case + `resolved_merchant` | `test_summarize_category_coalesce_override_wins`, `test_merchant_filter_and_group_by_use_effective_value` |
 | INV-23 | Dedupe identity is account+date+quantized amount+description; within-batch too. `allow_duplicates` suffixes `occ=N`. | Monthly re-import | `assign_dedupe_hashes`, `split_new_and_duplicates` | `tests/domain/test_dedupe.py::*` |
 | INV-24 | Raw mapping keys stored cleaned; lookup uses cleaned keys. | `" Sale "` hits `sale` | `clean_raw_value` | `test_create_mapping_cleans_raw_value_and_collapses_duplicates`, `test_classify_transaction_type_uses_cleaned_raw_value` |
 | INV-25 | Same-scope overlay loses to `db:`. | Preview shadowing | `MergedNormalizationLookup` | `test_same_scope_prefers_db_rule` |
-| INV-26 | `search` is not spend_only but still `date_to=today`. | Shared `_apply_filters` | `search_transactions` | `test_search_is_case_insensitive_and_includes_all_types` |
+| INV-26 | Analytics list endpoints default `date_to=today` via `_apply_filters`. | Shared `_apply_filters` | `search_transactions` | `test_search_is_case_insensitive_and_includes_all_types` |
 | INV-27 | Identity merchant map not required to filter/group by raw merchant. | Unmapped merchants queryable | `effective_merchant` fallback | `test_identity_merchant_map_not_required` |
 | INV-28 | `resolve_mapping` ignores per-import override. | Placeholder | `resolve_mapping` | `test_resolve_mapping_ignores_override_for_now` |
 | INV-29 | Delete type mapping previews resolver fallback (sign+kind if `sign_convention` else UNKNOWN). | Type-col-only accounts preview UNKNOWN; sign accounts preview sign-derived type | preview delete | `test_preview_delete_type_reverts_to_unknown`, `test_preview_delete_type_uses_sign_fallback` |
@@ -1763,8 +1762,8 @@ Stable id `INV-nn` is the citation key. Every row below is **[T]** (named test e
 | INV-35 | `preview_mappings` is pure. | Agent can preview freely | no session dirty | `test_preview_is_pure` |
 
 | INV-48 | Stored `is_spend` equals `effective_type == SPEND` after ingest, reclassify, and PATCH. | `list_unmatched` / CLI enrich filter `is_spend`, not `effective_type` | ingest, reclassify, PATCH | `test_type_override_flips_is_spend_and_drops_unmatched` |
-| INV-49 | `merchant` is allowed on category and transaction_type mappings; owner/merchant kinds reject it. Type lookup uses the same account+merchant precedence as category, plus a space-bounded prefix on the resolved merchant. | Chase WU `MISC_DEBIT` → TRANSFER without remapping rent | `allows_merchant_scope`, `merchant_scope_matches` | `test_transaction_type_mapping_merchant_scope`, `test_normalize_type_uses_resolved_merchant`, `test_reclassify_type_uses_merchant_scope`, `test_preview_type_merchant_scope_only_hits_matching_merchant` |
-| INV-50 | Merchant-kind `raw_value` matches exact or space-bounded prefix (longest prefix wins; account then global). | One `western union` alias covers every CAPTURE id | `allows_raw_prefix`, `space_bounded_prefix_match` | `test_merchant_kind_raw_value_prefix`, `test_classify_merchant_uses_raw_value_prefix`, `test_merchant_mapping_raw_value_prefix`, `test_preview_merchant_raw_prefix_covers_variants` |
+| INV-49 | `merchant` is allowed on category and transaction_type mappings; owner/merchant kinds reject it. Type lookup uses the same account+merchant precedence as category; merchant scope patterns support `%` wildcards. | Chase WU `MISC_DEBIT` → TRANSFER without remapping rent | `allows_merchant_scope`, `merchant_scope_matches`, `pattern_matches` | `test_transaction_type_mapping_merchant_scope`, `test_normalize_type_uses_resolved_merchant`, `test_reclassify_type_uses_merchant_scope`, `test_preview_type_merchant_scope_only_hits_matching_merchant` |
+| INV-50 | All kinds support `%` wildcards on `raw_value` (and merchant scope where allowed). Exact patterns beat wildcards; longer literal text wins among wildcards. | One `western union%` alias covers every CAPTURE id | `pattern_matches`, `pattern_rank_key` | `test_merchant_kind_raw_value_wildcard`, `test_classify_merchant_uses_raw_value_wildcard`, `test_merchant_mapping_raw_value_wildcard`, `test_preview_merchant_wildcard_covers_variants` |
 
 ### Privacy and scope
 
@@ -2045,7 +2044,7 @@ Verified against code:
 
 1. **`DELETE /mappings/{id}` returns 200 + reclass counts**, not 204. Same for PATCH. Wired through `apply_mapping_plan`. Proven: `test_list_and_delete_mapping`, `test_patch_and_delete_reclassify`.
 2. **`POST /mappings` does not reclassify.** After create-via-HTTP you still `POST /transactions/reclassify` (QA.md is right). Plan/apply/patch/delete do reclassify.
-3. **`search_transactions` shares `_apply_filters`** → `date_to` defaults to today though `spend_only=False`. Agent `list_transactions` does **not** share that helper (no date_to default). HTTP `GET /transactions` also has no date_to default.
+3. **`search_transactions` shares `_apply_filters`** → `date_to` defaults to today. Agent `list_transactions` does **not** share that helper (no date_to default). HTTP `GET /transactions` also has no date_to default.
 4. **Analytics filters by merchant, not category.** Category questions: `summarize(group_by="category")` or HTTP `GET /transactions?category=` (exact effective match).
 5. **Mapping plans use `ops` only.** No `rules` alias on `MappingPlanIn`.
 6. **`langgraph-supervisor` is absent** — not in requirements, not imported. Coordinator is a `create_agent` with two delegate tools, not a supervisor package.

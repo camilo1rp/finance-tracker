@@ -18,6 +18,7 @@ from app.schemas import (
     NormalizationMappingOut,
     OwnerOut,
     TotalOut,
+    TransactionListOut,
     TransactionOut,
 )
 from app.services import analytics_service
@@ -95,7 +96,7 @@ def list_transactions(
 ) -> str:
     """List stored transactions.
 
-    Does not apply spend_only and does not default date_to.
+    Does not default date_to.
     category/merchant filters match the effective value
     (override → normalized → raw). limit must be >= 1.
     """
@@ -134,15 +135,15 @@ def search_transactions_tool(
 ) -> str:
     """Search transaction descriptions (case-insensitive substring).
 
-    Does not apply spend_only. The analytics service still upper-bounds
-    transaction_date at today when date_to is omitted.
-    merchant matches the effective value (override → normalized → raw).
-    limit must be >= 1.
+    Returns {totals, transactions}. totals uses the same field meanings as
+    get_total over all rows matching the query (not just limit). The transaction
+    list is capped at limit. date_to defaults to today when omitted.
+    merchant matches the effective value. limit must be >= 1.
     """
     if err := _limit_error(limit):
         return err
     with tool_session() as db:
-        rows = analytics_service.search_transactions(
+        payload = analytics_service.search_transactions(
             db,
             _parse_date(date_from),
             _parse_date(date_to),
@@ -152,7 +153,12 @@ def search_transactions_tool(
             limit,
             merchant,
         )
-        return _dump([TransactionOut.model_validate(row) for row in rows])
+        return TransactionListOut.model_validate(
+            {
+                "totals": payload["totals"],
+                "transactions": payload["transactions"],
+            }
+        ).model_dump_json()
 
 
 @tool
@@ -162,21 +168,19 @@ def summarize(
     date_to: str | None = None,
     account_id: int | None = None,
     owner_id: int | None = None,
-    spend_only: bool = True,
     merchant: str | None = None,
     transaction_type: str | None = None,
 ) -> str:
-    """Group transaction totals.
+    """Group transaction totals with the same breakdown as get_total per bucket.
 
     group_by is category, owner, month, account, or merchant.
-    Month buckets are YYYY-MM, ascending; other groupings sort by total desc.
+    Each row includes by_type, purchases, refunds, spend (purchases − refunds),
+    net_cash_flow, total, count, average. Month buckets are YYYY-MM, ascending;
+    other groupings sort by spend desc.
     "(unassigned)" is the bucket for missing groups.
-    Defaults: spend_only=true (only effective SPEND rows; totals use abs(amount))
-    and date_to=today. When transaction_type is set, filters that effective type
-    and ignores spend_only. spend_only=false sums signed amounts as stored.
+    date_to defaults to today. When transaction_type is set, total/count/average
+    in each row match that type instead of net spend.
     merchant matches the effective value (override → normalized → raw).
-    Amounts are decimal strings. There is no category filter; group_by=category
-    to break down by category.
     """
     with tool_session() as db:
         rows = analytics_service.summarize(
@@ -186,7 +190,6 @@ def summarize(
             account_id,
             owner_id,
             group_by,
-            spend_only,
             merchant,
             transaction_type,
         )
@@ -199,7 +202,6 @@ def get_total(
     date_to: str | None = None,
     account_id: int | None = None,
     owner_id: int | None = None,
-    spend_only: bool = True,
     merchant: str | None = None,
     transaction_type: str | None = None,
 ) -> str:
@@ -208,8 +210,7 @@ def get_total(
     Type SPEND means purchases/charges, not household spending.
     `purchases` = SPEND bucket; `refunds` = REFUND bucket;
     `spend`/`total` = purchases − refunds; `count`/`average` over purchase
-    rows. `net_cash_flow` = income + refunds − purchases − fees (same as
-    /analytics/cash-flow `net`; transfers and adjustments excluded).
+    rows. `net_cash_flow` = income + refunds − purchases − fees (same as get_cash_flow).
     `by_type` lists every effective type (abs amounts). If transaction_type
     is set, `total`/`count`/`average` match that type instead.
     sign_convention (when account_id is set) is CSV import convention.
@@ -223,7 +224,6 @@ def get_total(
             _parse_date(date_to),
             account_id,
             owner_id,
-            spend_only,
             merchant,
             transaction_type,
         )
@@ -237,16 +237,14 @@ def top_merchants(
     date_to: str | None = None,
     account_id: int | None = None,
     owner_id: int | None = None,
-    spend_only: bool = True,
     merchant: str | None = None,
     transaction_type: str | None = None,
 ) -> str:
-    """Top merchants by total.
+    """Top merchants by net spend (purchases − refunds) with get_total breakdown.
 
-    Defaults: spend_only=true (only effective SPEND rows; totals use abs(amount)),
-    date_to=today, limit=10. When transaction_type is set, filters that effective
-    type and ignores spend_only. spend_only=false sums signed amounts as stored.
-    merchant matches the effective value. Amounts are decimal strings.
+    Each row includes the same fields as get_total plus merchant.
+    date_to defaults to today, limit=10. When transaction_type is set,
+    total/count/average match that type. merchant filter matches the effective value.
     limit must be >= 1.
     """
     if err := _limit_error(limit):
@@ -258,7 +256,6 @@ def top_merchants(
             _parse_date(date_to),
             account_id,
             owner_id,
-            spend_only,
             limit,
             merchant,
             transaction_type,
@@ -273,31 +270,35 @@ def largest_transactions(
     date_to: str | None = None,
     account_id: int | None = None,
     owner_id: int | None = None,
-    spend_only: bool = True,
     merchant: str | None = None,
     transaction_type: str | None = None,
 ) -> str:
-    """Largest transactions by absolute amount.
+    """Largest transactions by absolute amount with filter-scoped totals.
 
-    Defaults: spend_only=true (only effective SPEND rows), date_to=today, limit=10.
-    When transaction_type is set, filters that effective type and ignores spend_only.
-    Does not default to a category filter. limit must be >= 1.
+    Returns {totals, transactions}. totals uses get_total field meanings over
+    the same date/account/owner/merchant window (all types, not just the list).
+    The transactions list includes all types unless transaction_type is set.
+    limit must be >= 1.
     """
     if err := _limit_error(limit):
         return err
     with tool_session() as db:
-        rows = analytics_service.largest_transactions(
+        payload = analytics_service.largest_transactions(
             db,
             _parse_date(date_from),
             _parse_date(date_to),
             account_id,
             owner_id,
-            spend_only,
             limit,
             merchant,
             transaction_type,
         )
-        return _dump([TransactionOut.model_validate(row) for row in rows])
+        return TransactionListOut.model_validate(
+            {
+                "totals": payload["totals"],
+                "transactions": payload["transactions"],
+            }
+        ).model_dump_json()
 
 
 @tool
@@ -308,10 +309,11 @@ def get_cash_flow(
     owner_id: int | None = None,
     merchant: str | None = None,
 ) -> str:
-    """Household cash-flow buckets by effective transaction type.
+    """Household cash-flow with the same core totals as get_total plus extras.
 
-    Returns spend, income, refunds, fees, transfers, other, net, and other_count.
-    net = income + refunds - spend - fees. Excludes transfers and other from net.
+    Includes by_type, purchases, refunds, spend (purchases − refunds),
+    net_cash_flow, total, count, average, plus income, fees, transfers,
+    other, and other_count. net_cash_flow excludes transfers and other.
     Depository outflows that fund card payments may appear as SPEND until
     overridden — prefer account_id for a single-account view.
     """

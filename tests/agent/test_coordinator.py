@@ -47,7 +47,6 @@ def test_coordinator_answers_total_without_subagent(
                         "args": {
                             "date_from": "2024-08-01",
                             "date_to": "2024-08-31",
-                            "spend_only": True,
                         },
                         "id": "total-1",
                     }
@@ -55,7 +54,7 @@ def test_coordinator_answers_total_without_subagent(
             ),
             AIMessage(
                 content=(
-                    "Spent 0.00 in August. Filters: spend_only=true, "
+                    "Spent 0.00 in August. Filters: "
                     "date_from=2024-08-01, date_to=2024-08-31."
                 )
             ),
@@ -90,8 +89,7 @@ def test_coordinator_delegates_compare_to_analyst(
                         "args": {
                             "task": (
                                 "Compare dining July vs August for owner_id=1 "
-                                "2024-07-01..2024-07-31 vs 2024-08-01..2024-08-31 "
-                                "spend_only=true"
+                                "2024-07-01..2024-07-31 vs 2024-08-01..2024-08-31"
                             )
                         },
                         "id": "ask-1",
@@ -221,7 +219,7 @@ def test_coordinator_history_excludes_analyst_internals(
     db_session: Session, agent_sessions
 ) -> None:
     seed_coffee(db_session)
-    analyst_final = "July 10.00 vs August 20.00 delta 10.00. spend_only=true."
+    analyst_final = "July 10.00 vs August 20.00 delta 10.00."
     coordinator_model = ScriptedChatModel(
         responses=[
             AIMessage(

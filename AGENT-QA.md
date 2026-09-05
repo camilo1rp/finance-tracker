@@ -67,9 +67,9 @@ How much did we spend in <Month A>?
 **Pass:**
 
 - Answer includes a decimal total and a count
-- It states filters: `spend_only` (should be true unless you asked otherwise) and the date range it used
+- It states filters: date range (and owner/account if used)
 - Dates are concrete `YYYY-MM-DD`, not “last month”
-- Total is in the same ballpark as `GET /analytics/total?date_from=...&date_to=...&spend_only=true`
+- Total is in the same ballpark as `GET /analytics/total?date_from=...&date_to=...` `spend` for the same scope
 
 **Fail here:** invented numbers, no date range, or a pause for mapping approval (this question must not hit the steward).
 
@@ -92,7 +92,7 @@ Compare <Month B> vs <Month A> by category for <owner name>
 **Pass:**
 
 - Per-category lines with **two** month totals and a delta
-- Filters stated (owner, dates, `spend_only`)
+- Filters stated (owner, dates)
 - Deltas match subtracting the two `GET /analytics/summary?group_by=category&owner_id=...` calls for those date ranges (spot-check 2–3 categories, including `(unassigned)` if it appears)
 - No approval interrupt
 
@@ -110,7 +110,7 @@ One search / listing check:
 Find transactions whose description contains <a merchant fragment you know>
 ```
 
-**Pass:** hits include refunds/payments if they match (search is **not** spend-only). Matches `GET /analytics/search?query=...`.
+**Pass:** hits include refunds/payments if they match (search is **not** spend-only). Response is `{totals, transactions}`; list matches `GET /analytics/search?query=...`; `totals` covers all query matches.
 
 ---
 
@@ -213,7 +213,7 @@ These are the domain footguns. After a total/summary answer, confirm against the
 
 | Quirk | How to catch it |
 |---|---|
-| Analytics default `spend_only=true` (abs amount, SPEND only) | Agent total ≈ `/analytics/total`; much higher than SPEND count → it turned `spend_only` off or counted payments |
+| Analytics return full breakdown; use `spend` for net spending | Agent total ≈ `/analytics/total` `spend`; check `purchases`/`refunds`/`by_type` if numbers look off |
 | Analytics default `date_to=today` | A total with no end date should not include future-dated rows; range should be stated |
 | `list` / `search` are **not** spend-only | Search for a known refund description; it should appear |
 | Category/merchant filters use **effective** value (override → normalized → raw) | After a mapping apply, `/analytics/summary?group_by=category` uses the canonical name, not the bank raw string |
@@ -227,7 +227,7 @@ Ask one question that **should** stay on the coordinator (`total for Month A`) a
 ## Fail = stop
 
 - CLI cannot start: missing `ANTHROPIC_API_KEY`, bad `DATABASE_URL` (host `db` from the host), or missing `langgraph-checkpoint-sqlite` / Postgres saver
-- Totals that do not match `/analytics/total` for the same dates/owner/`spend_only` → fabricating or wrong filters
+- Totals that do not match `/analytics/total` for the same dates/owner → fabricating or wrong filters
 - Compare question never names categories/merchants or uses round numbers that are not in `/analytics/summary` → analyst skipped tools
 - Cleanup applies mappings **before** `decision>` → interrupt not propagating
 - Restart with the same thread id loses the approval → checkpointer not durable (in-memory fallback, new file path, or new thread id)

@@ -119,20 +119,32 @@ Not seeded by default — Chase also uses `LOAN_PMT` for mortgage/auto.
 }
 ```
 
-`merchant` matches the resolved label exactly, or as a leading prefix (`WESTERN UNION CAPTURE 623…` hits `western union`). Then `POST /transactions/reclassify?account_id=…`.
+`merchant` matches the resolved label using the same pattern rules as raw_value (`%` = any sequence; no `%` = exact). Use a prefix pattern for ACH variants:
 
-Do **not** create one merchant alias per capture id. One prefix alias is enough:
+```json
+{
+  "kind": "transaction_type",
+  "raw_value": "misc_debit",
+  "canonical_value": "TRANSFER",
+  "account_id": "<checking_account_id>",
+  "merchant": "western union%"
+}
+```
+
+Then `POST /transactions/reclassify?account_id=…`.
+
+Do **not** create one merchant alias per capture id. One wildcard alias is enough:
 
 ```json
 {
   "kind": "merchant",
-  "raw_value": "western union",
+  "raw_value": "western union%",
   "canonical_value": "Western Union",
   "account_id": "<checking_account_id>"
 }
 ```
 
-Same prefix applies to Marshalls-style store-number suffixes (`marshalls` hits `marshalls #59 …`).
+Same for Marshalls-style store-number suffixes (`marshalls%` hits `marshalls #59 …`).
 
 **Type mappings** — `POST /mappings` only for values **not** covered by seeds (global):
 
@@ -200,20 +212,20 @@ Already-imported rows do not pick up new rules by themselves. After adding mappi
 
 ## 4. Analytics smoke
 
-All of these default to `spend_only=true` except search.
+All analytics endpoints return a full type breakdown (`purchases`, `refunds`, `spend`, `net_cash_flow`, `by_type`). Use `spend` for net spending and `transaction_type` to filter when needed.
 
 | Call | What to look for |
 |---|---|
-| `GET /analytics/by-category` | Override category appears; mapped name not the raw Chase string if you mapped it |
-| `GET /analytics/by-owner` | Chase default owner + Apple people; no silent drop (nulls show as `(unassigned)`) |
-| `GET /analytics/by-month` | `YYYY-MM` buckets, chronological |
-| `GET /analytics/summary?group_by=account` | Chase vs Apple totals |
+| `GET /analytics/by-category` | Same breakdown as `/total` per category (`spend` = purchases − refunds); override category appears |
+| `GET /analytics/by-owner` | Same breakdown per owner; Chase default owner + Apple people; nulls show as `(unassigned)` |
+| `GET /analytics/by-month` | `YYYY-MM` buckets, chronological; each bucket has purchases/refunds/spend |
+| `GET /analytics/summary?group_by=account` | Chase vs Apple with shared totals fields |
 | `GET /analytics/total` | `spend` = purchases − refunds; `net_cash_flow` = income + refunds − purchases − fees |
-| `GET /analytics/top-merchants?limit=10` | Descriptions you recognize |
-| `GET /analytics/largest?limit=5` | Biggest **absolute** spends, not a large payment |
-| `GET /analytics/search?query=` | A merchant fragment; refunds/payments **do** appear |
+| `GET /analytics/top-merchants?limit=10` | Merchants sorted by `spend`; each row has full breakdown |
+| `GET /analytics/largest?limit=5` | `{totals, transactions}`; list is biggest **absolute** spends |
+| `GET /analytics/search?query=` | `{totals, transactions}`; totals scoped to query; refunds/payments **do** appear in list |
 | `GET /analytics/unmapped` | Shrinks after you added rules; leftover is the real worklist |
-| `GET /analytics/cash-flow` | Buckets by effective type; `other` holds ADJUSTMENT/UNKNOWN; `net` excludes transfers and `other` |
+| `GET /analytics/cash-flow` | Same core fields as `/total` plus income/fees/transfers/other; `net_cash_flow` excludes transfers and `other` |
 
 **Fix mis-kinded account (SQL + reclassify):**
 
@@ -234,7 +246,7 @@ Filter one call with `account_id` and one with `date_from` / `date_to` for a mon
 - Everything `UNKNOWN` → type mappings not hitting (`Sale` vs `sale` is fine; `Sale ` extra words is not)
 - Apple everyone is the Chase default owner → `owner_col` missing or names unmapped
 - Re-import inserts again → dedupe hash identity changed (date/amount/description parsed differently)
-- `/analytics/total` much lower than spend rows → `spend_only` hiding `UNKNOWN` types you never mapped
-- Largest row is a payment → you passed `spend_only=false` by accident
+- `/analytics/total` `spend` much lower than `purchases` → refunds in the window; check `refunds` and `by_type`
+- Largest row is a payment → use `transaction_type=SPEND` on `/analytics/largest` if you only want purchases
 
 Do not need: sign-only accounts, dirty-row fixtures, or a third card. That is a later pass.

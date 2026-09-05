@@ -80,7 +80,7 @@ def test_analyst_two_summarize_calls_wrapper_returns_final_only(
 
     final = (
         "July Dining=10.00 August Dining=20.00 delta=10.00. "
-        "Filters: owner_id=1, spend_only=true, 2024-07-01..2024-07-31 vs 2024-08-01..2024-08-31."
+        "Filters: owner_id=1, 2024-07-01..2024-07-31 vs 2024-08-01..2024-08-31."
     )
     model = ScriptedChatModel(
         responses=[

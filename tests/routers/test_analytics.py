@@ -87,7 +87,7 @@ def test_summarize_category_coalesce_override_wins(db_session: Session) -> None:
     assert by_name["RawOnly"]["total"] == Decimal("3.00")
 
 
-def test_spend_only_excludes_payments_and_refunds(db_session: Session) -> None:
+def test_total_breakdown_includes_all_types(db_session: Session) -> None:
     _, account = _seed_account(db_session)
     _add_txn(db_session, account.id, "spend", amount=Decimal("10.00"))
     _add_txn(
@@ -106,17 +106,14 @@ def test_spend_only_excludes_payments_and_refunds(db_session: Session) -> None:
         transaction_type="REFUND",
         is_spend=False,
     )
-    spend = get_total(db_session, None, None, None, None, spend_only=True)
-    assert spend["purchases"] == Decimal("10.00")
-    assert spend["refunds"] == Decimal("4.00")
-    assert spend["spend"] == Decimal("6.00")
-    assert spend["total"] == Decimal("6.00")
-    assert spend["count"] == 1
-    assert spend["net_cash_flow"] == Decimal("94.00")
-    all_types = get_total(db_session, None, None, None, None, spend_only=False)
-    assert all_types["spend"] == Decimal("6.00")
-    assert all_types["net_cash_flow"] == Decimal("94.00")
-    assert {row["transaction_type"] for row in all_types["by_type"]} == {
+    body = get_total(db_session, None, None, None, None)
+    assert body["purchases"] == Decimal("10.00")
+    assert body["refunds"] == Decimal("4.00")
+    assert body["spend"] == Decimal("6.00")
+    assert body["total"] == Decimal("6.00")
+    assert body["count"] == 1
+    assert body["net_cash_flow"] == Decimal("94.00")
+    assert {row["transaction_type"] for row in body["by_type"]} == {
         "SPEND",
         "INCOME",
         "REFUND",
@@ -140,9 +137,53 @@ def test_mixed_sign_spends_use_abs(db_session: Session) -> None:
         category_normalized="Dining",
     )
     rows = summarize(db_session, None, None, None, None, "category")
-    assert rows == [
-        {"group_value": "Dining", "total": Decimal("66.77"), "count": 2}
-    ]
+    assert len(rows) == 1
+    assert rows[0]["group_value"] == "Dining"
+    assert rows[0]["purchases"] == Decimal("66.77")
+    assert rows[0]["spend"] == Decimal("66.77")
+    assert rows[0]["count"] == 2
+
+
+def test_group_by_owner(db_session: Session) -> None:
+    owner_a = Owner(name="Alice")
+    owner_b = Owner(name="Bob")
+    db_session.add_all([owner_a, owner_b])
+    db_session.flush()
+    account = Account(
+        name="Card",
+        last4="0000",
+        default_owner_id=owner_a.id,
+        source_format="csv",
+        default_mapping={
+            "date_col": "Date",
+            "description_col": "Description",
+            "amount_col": "Amount",
+            "type_col": "Type",
+        },
+    )
+    db_session.add(account)
+    db_session.flush()
+    _add_txn(
+        db_session,
+        account.id,
+        "alice-spend",
+        owner_id=owner_a.id,
+        amount=Decimal("12.00"),
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "bob-spend",
+        owner_id=owner_b.id,
+        amount=Decimal("8.00"),
+    )
+    _add_txn(db_session, account.id, "unassigned")
+
+    rows = summarize(db_session, None, None, None, None, "owner")
+    by_name = {row["group_value"]: row for row in rows}
+    assert by_name["Alice"]["spend"] == Decimal("12.00")
+    assert by_name["Bob"]["spend"] == Decimal("8.00")
+    assert by_name["(unassigned)"]["spend"] == Decimal("10.00")
 
 
 def test_group_by_month_yyyy_mm(db_session: Session) -> None:
@@ -241,6 +282,67 @@ def test_get_total_by_type_and_sign_convention(db_session: Session) -> None:
     ]
 
 
+def test_summarize_refund_reduces_group_spend(db_session: Session) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "purchase",
+        category_normalized="Dining",
+        amount=Decimal("20.00"),
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "refund",
+        category_normalized="Dining",
+        amount=Decimal("5.00"),
+        transaction_type="REFUND",
+        is_spend=False,
+    )
+    rows = summarize(db_session, None, None, None, None, "category")
+    assert len(rows) == 1
+    assert rows[0]["purchases"] == Decimal("20.00")
+    assert rows[0]["refunds"] == Decimal("5.00")
+    assert rows[0]["spend"] == Decimal("15.00")
+    assert rows[0]["total"] == Decimal("15.00")
+
+
+def test_top_merchants_sorts_by_net_spend(
+    client: TestClient, db_session: Session
+) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "alpha-buy",
+        merchant_normalized="Alpha",
+        amount=Decimal("50.00"),
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "alpha-refund",
+        merchant_normalized="Alpha",
+        amount=Decimal("40.00"),
+        transaction_type="REFUND",
+        is_spend=False,
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "beta-buy",
+        merchant_normalized="Beta",
+        amount=Decimal("20.00"),
+    )
+    response = client.get("/analytics/top-merchants")
+    assert response.status_code == 200
+    merchants = response.json()
+    assert [row["merchant"] for row in merchants] == ["Beta", "Alpha"]
+    assert Decimal(str(merchants[0]["spend"])) == Decimal("20.00")
+    assert Decimal(str(merchants[1]["spend"])) == Decimal("10.00")
+
+
 def test_invalid_group_by_is_422(client: TestClient) -> None:
     response = client.get("/analytics/summary", params={"group_by": "nope"})
     assert response.status_code == 422
@@ -261,8 +363,12 @@ def test_search_is_case_insensitive_and_includes_all_types(
     )
     response = client.get("/analytics/search", params={"query": "AmAzOn"})
     assert response.status_code == 200
-    descriptions = {row["description"] for row in response.json()}
+    body = response.json()
+    descriptions = {row["description"] for row in body["transactions"]}
     assert descriptions == {"AMAZON MARKETPLACE", "amazon refund"}
+    assert body["totals"]["purchases"] == "10.00"
+    assert body["totals"]["refunds"] == "10.00"
+    assert body["totals"]["spend"] == "0.00"
 
 
 def test_largest_orders_by_absolute_amount(
@@ -273,8 +379,12 @@ def test_largest_orders_by_absolute_amount(
     _add_txn(db_session, account.id, "neg-big", amount=Decimal("-54.32"))
     response = client.get("/analytics/largest", params={"limit": 2})
     assert response.status_code == 200
-    amounts = [Decimal(row["amount"]) for row in response.json()]
+    body = response.json()
+    amounts = [Decimal(row["amount"]) for row in body["transactions"]]
     assert amounts == [Decimal("-54.32"), Decimal("12.45")]
+    assert body["totals"]["purchases"] == "66.77"
+    assert body["totals"]["spend"] == "66.77"
+    assert len(body["transactions"]) == 2
 
 
 def test_by_category_alias_matches_summary(

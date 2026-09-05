@@ -68,9 +68,9 @@ def test_type_override_flips_is_spend_and_drops_unmatched(
 
 def test_spend_analytics_respects_type_override(client: TestClient, db_session: Session) -> None:
     txn = _seed_spend(db_session)
-    spend_before = client.get("/analytics/total", params={"spend_only": True})
+    spend_before = client.get("/analytics/total")
     assert spend_before.json()["count"] == 1
 
     client.patch(f"/transactions/{txn.id}", json={"type_override": "INCOME"})
-    spend_after = client.get("/analytics/total", params={"spend_only": True})
+    spend_after = client.get("/analytics/total")
     assert spend_after.json()["count"] == 0

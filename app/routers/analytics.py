@@ -5,7 +5,14 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_session
-from app.schemas import CashFlowOut, GroupSummary, MerchantSummary, TotalOut, TransactionOut, UnmappedValuesOut
+from app.schemas import (
+    CashFlowOut,
+    GroupSummary,
+    MerchantSummary,
+    TotalOut,
+    TransactionListOut,
+    UnmappedValuesOut,
+)
 from app.services import analytics_service
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
@@ -21,7 +28,6 @@ def summary(
     account_id: int | None = None,
     owner_id: int | None = None,
     merchant: str | None = None,
-    spend_only: bool = True,
     transaction_type: str | None = None,
     db: Session = Depends(get_session),
 ) -> list[GroupSummary]:
@@ -32,7 +38,6 @@ def summary(
         account_id,
         owner_id,
         group_by,
-        spend_only,
         merchant,
         transaction_type,
     )
@@ -45,7 +50,6 @@ def by_category(
     account_id: int | None = None,
     owner_id: int | None = None,
     merchant: str | None = None,
-    spend_only: bool = True,
     transaction_type: str | None = None,
     db: Session = Depends(get_session),
 ) -> list[GroupSummary]:
@@ -56,7 +60,6 @@ def by_category(
         account_id,
         owner_id,
         "category",
-        spend_only,
         merchant,
         transaction_type,
     )
@@ -69,7 +72,6 @@ def by_owner(
     account_id: int | None = None,
     owner_id: int | None = None,
     merchant: str | None = None,
-    spend_only: bool = True,
     transaction_type: str | None = None,
     db: Session = Depends(get_session),
 ) -> list[GroupSummary]:
@@ -80,7 +82,6 @@ def by_owner(
         account_id,
         owner_id,
         "owner",
-        spend_only,
         merchant,
         transaction_type,
     )
@@ -93,7 +94,6 @@ def by_month(
     account_id: int | None = None,
     owner_id: int | None = None,
     merchant: str | None = None,
-    spend_only: bool = True,
     transaction_type: str | None = None,
     db: Session = Depends(get_session),
 ) -> list[GroupSummary]:
@@ -104,7 +104,6 @@ def by_month(
         account_id,
         owner_id,
         "month",
-        spend_only,
         merchant,
         transaction_type,
     )
@@ -117,7 +116,6 @@ def total(
     account_id: int | None = None,
     owner_id: int | None = None,
     merchant: str | None = None,
-    spend_only: bool = True,
     transaction_type: str | None = None,
     db: Session = Depends(get_session),
 ) -> TotalOut:
@@ -127,7 +125,6 @@ def total(
         date_to,
         account_id,
         owner_id,
-        spend_only,
         merchant,
         transaction_type,
     )
@@ -144,9 +141,9 @@ def cash_flow(
 ) -> CashFlowOut:
     """Household cash-flow by effective type.
 
-    net = income + refunds - spend - fees. Excludes transfers and other
-    (ADJUSTMENT, UNKNOWN). Depository outflows that fund card payments may
-    appear as SPEND until overridden — prefer account_id for one account.
+    net_cash_flow = income + refunds - purchases - fees. Excludes transfers
+    and other (ADJUSTMENT, UNKNOWN). Depository outflows that fund card
+    payments may appear as SPEND until overridden — prefer account_id for one account.
     """
     return analytics_service.cash_flow(
         db, date_from, date_to, account_id, owner_id, merchant
@@ -160,7 +157,6 @@ def top_merchants(
     account_id: int | None = None,
     owner_id: int | None = None,
     merchant: str | None = None,
-    spend_only: bool = True,
     transaction_type: str | None = None,
     limit: int = Query(default=10, ge=1),
     db: Session = Depends(get_session),
@@ -171,39 +167,36 @@ def top_merchants(
         date_to,
         account_id,
         owner_id,
-        spend_only,
         limit,
         merchant,
         transaction_type,
     )
 
 
-@router.get("/largest", response_model=list[TransactionOut])
+@router.get("/largest", response_model=TransactionListOut)
 def largest(
     date_from: date | None = None,
     date_to: date | None = None,
     account_id: int | None = None,
     owner_id: int | None = None,
     merchant: str | None = None,
-    spend_only: bool = True,
     transaction_type: str | None = None,
     limit: int = Query(default=10, ge=1),
     db: Session = Depends(get_session),
-) -> list[TransactionOut]:
+) -> TransactionListOut:
     return analytics_service.largest_transactions(
         db,
         date_from,
         date_to,
         account_id,
         owner_id,
-        spend_only,
         limit,
         merchant,
         transaction_type,
     )
 
 
-@router.get("/search", response_model=list[TransactionOut])
+@router.get("/search", response_model=TransactionListOut)
 def search(
     query: str,
     date_from: date | None = None,
@@ -213,7 +206,7 @@ def search(
     merchant: str | None = None,
     limit: int = Query(default=50, ge=1),
     db: Session = Depends(get_session),
-) -> list[TransactionOut]:
+) -> TransactionListOut:
     return analytics_service.search_transactions(
         db, date_from, date_to, account_id, owner_id, query, limit, merchant
     )
