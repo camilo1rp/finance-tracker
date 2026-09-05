@@ -28,7 +28,7 @@ class NormalizationMappingCreate(BaseModel):
     raw_value: str
     canonical_value: str
     account_id: Optional[int] = None  # None = global rule
-    merchant: Optional[str] = None  # category only; None = all merchants
+    merchant: Optional[str] = None  # category / transaction_type; None = all merchants
 
 
 class NormalizationMappingOut(BaseModel):
@@ -51,7 +51,7 @@ class CreateMappingOp(BaseModel):
     raw_value: str
     canonical_value: str
     account_id: Optional[int] = None
-    merchant: Optional[str] = None  # only valid when kind == "category"
+    merchant: Optional[str] = None  # category or transaction_type; None = all merchants
 
 
 class UpdateMappingOp(BaseModel):
@@ -205,6 +205,7 @@ class ImportMappingIn(BaseModel):
 class AccountCreate(BaseModel):
     name: str
     last4: str
+    account_kind: str
     default_owner_id: Optional[int] = None
     source_format: str = "csv"
     default_mapping: ImportMappingIn
@@ -216,6 +217,7 @@ class AccountOut(BaseModel):
     id: int
     name: str
     last4: str
+    account_kind: str
     default_owner_id: Optional[int]
     source_format: str
 
@@ -267,6 +269,7 @@ class TransactionOut(BaseModel):
     description: str
     amount: Decimal
     transaction_type: str
+    type_override: Optional[str] = None
     is_spend: bool
     category_raw: Optional[str]
     category_normalized: Optional[str]
@@ -287,6 +290,18 @@ class TransactionPatch(BaseModel):
     category_override: Optional[str] = None
     owner_id: Optional[int] = None
     merchant_override: Optional[str] = None
+    type_override: Optional[str] = None
+
+
+class CashFlowOut(BaseModel):
+    spend: Decimal
+    income: Decimal
+    refunds: Decimal
+    fees: Decimal
+    transfers: Decimal
+    other: Decimal
+    net: Decimal
+    other_count: int
 
 
 # ---- Analytics ----
@@ -297,10 +312,22 @@ class GroupSummary(BaseModel):
     count: int
 
 
+class TypeTotalOut(BaseModel):
+    transaction_type: str
+    total: Decimal
+    count: int
+
+
 class TotalOut(BaseModel):
+    by_type: list[TypeTotalOut]
+    purchases: Decimal
+    refunds: Decimal
+    spend: Decimal
+    net_cash_flow: Decimal
     total: Decimal
     count: int
     average: Decimal
+    sign_convention: Optional[str] = None
 
 
 class MerchantSummary(BaseModel):

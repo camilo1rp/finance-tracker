@@ -13,6 +13,7 @@ router = APIRouter(prefix="/imports", tags=["imports"])
 def import_csv(
     account_id: int,
     file: UploadFile,
+    allow_duplicates: bool = False,
     db: Session = Depends(get_session),
 ) -> ImportResult:
     """
@@ -28,6 +29,7 @@ def import_csv(
             source=CsvSource(),
             fetch_kwargs={"file_path": file.file},
             filename=file.filename or "upload.csv",
+            allow_duplicates=allow_duplicates,
         )
     except AccountNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

@@ -9,6 +9,10 @@ from app.domain.db_lookup import DbNormalizationLookup
 from app.models import Transaction
 
 
+def _category_mappings(client: TestClient) -> list[dict]:
+    return [m for m in client.get("/mappings").json() if m["kind"] == "category"]
+
+
 def _account(client: TestClient) -> int:
     owner = client.post("/owners", json={"name": "Pat"}).json()
     account = client.post(
@@ -17,6 +21,7 @@ def _account(client: TestClient) -> int:
             "name": "Card",
             "last4": "1111",
             "default_owner_id": owner["id"],
+            "account_kind": "credit_card",
             "default_mapping": {
                 "date_col": "Date",
                 "description_col": "Description",
@@ -89,14 +94,14 @@ def test_db_lookup_prefers_account_rule(client: TestClient, db_session: Session)
         json={
             "kind": "transaction_type",
             "raw_value": "sale",
-            "canonical_value": "PAYMENT",
+            "canonical_value": "TRANSFER",
             "account_id": account_id,
         },
     )
     lookup = DbNormalizationLookup(db_session)
     assert (
         lookup.resolve(NormalizationKind.TRANSACTION_TYPE, "sale", account_id)
-        == "PAYMENT"
+        == "TRANSFER"
     )
     assert (
         lookup.resolve(NormalizationKind.TRANSACTION_TYPE, "sale", account_id=999)
@@ -151,6 +156,7 @@ def test_category_mapping_merchant_scope(client: TestClient, db_session: Session
         },
     )
     assert rejected.status_code == 422
+    assert "merchant scope is only allowed" in rejected.json()["detail"]
 
     duplicate = client.post(
         "/mappings",
@@ -174,6 +180,99 @@ def test_category_mapping_merchant_scope(client: TestClient, db_session: Session
         "Shopping"
     )
     assert lookup.resolve(NormalizationKind.CATEGORY, "shopping", 999) == "Shopping"
+
+
+def test_transaction_type_mapping_merchant_scope(
+    client: TestClient, db_session: Session
+) -> None:
+    account_id = _account(client)
+    scoped = client.post(
+        "/mappings",
+        json={
+            "kind": "transaction_type",
+            "raw_value": "MISC_DEBIT",
+            "canonical_value": "TRANSFER",
+            "account_id": account_id,
+            "merchant": " Western Union ",
+        },
+    )
+    assert scoped.status_code == 201, scoped.text
+    assert scoped.json()["merchant"] == "western union"
+
+    unscoped = client.post(
+        "/mappings",
+        json={
+            "kind": "transaction_type",
+            "raw_value": "MISC_DEBIT",
+            "canonical_value": "SPEND",
+            "account_id": account_id,
+        },
+    )
+    assert unscoped.status_code == 201, unscoped.text
+
+    lookup = DbNormalizationLookup(db_session)
+    assert (
+        lookup.resolve(
+            NormalizationKind.TRANSACTION_TYPE,
+            "misc_debit",
+            account_id,
+            "western union",
+        )
+        == "TRANSFER"
+    )
+    assert (
+        lookup.resolve(
+            NormalizationKind.TRANSACTION_TYPE,
+            "misc_debit",
+            account_id,
+            "western union capture 623287974331123 web id: 9222993574",
+        )
+        == "TRANSFER"
+    )
+    assert (
+        lookup.resolve(
+            NormalizationKind.TRANSACTION_TYPE,
+            "misc_debit",
+            account_id,
+            "woodlake op",
+        )
+        == "SPEND"
+    )
+
+
+def test_merchant_mapping_raw_value_prefix(
+    client: TestClient, db_session: Session
+) -> None:
+    account_id = _account(client)
+    created = client.post(
+        "/mappings",
+        json={
+            "kind": "merchant",
+            "raw_value": "Western Union",
+            "canonical_value": "Western Union",
+            "account_id": account_id,
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["raw_value"] == "western union"
+
+    lookup = DbNormalizationLookup(db_session)
+    assert (
+        lookup.resolve(
+            NormalizationKind.MERCHANT,
+            "western union capture 623287974331123 web id: 9222993574",
+            account_id,
+        )
+        == "Western Union"
+    )
+    assert (
+        lookup.resolve(
+            NormalizationKind.MERCHANT,
+            "woodlake op rent 270209230 web id: 1861072180",
+            account_id,
+        )
+        is None
+    )
 
 
 def test_preview_and_apply_endpoints(client: TestClient, db_session: Session) -> None:
@@ -211,7 +310,7 @@ def test_preview_and_apply_endpoints(client: TestClient, db_session: Session) ->
     assert payload["scanned"] == 1
     assert payload["total_would_change"] == 1
     assert payload["ops"][0]["would_change"] == 1
-    assert client.get("/mappings").json() == []
+    assert _category_mappings(client) == []
 
     listed_before = client.get("/transactions", params={"account_id": account_id}).json()
     assert listed_before[0]["category_normalized"] is None
@@ -226,7 +325,7 @@ def test_preview_and_apply_endpoints(client: TestClient, db_session: Session) ->
     assert result["reclass_updated"] == 1
     assert result["unmapped_after"]["categories"] == []
 
-    mappings = client.get("/mappings").json()
+    mappings = _category_mappings(client)
     assert len(mappings) == 1
     assert mappings[0]["raw_value"] == "food & drink"
     listed = client.get("/transactions", params={"account_id": account_id}).json()
@@ -255,7 +354,9 @@ def test_apply_endpoint_rejects_invalid_plan(client: TestClient) -> None:
         },
     )
     assert response.status_code == 422
-    assert "merchant only valid for category" in str(response.json()["detail"])
+    assert "merchant only valid for category or transaction_type" in str(
+        response.json()["detail"]
+    )
 
 
 def test_patch_and_delete_reclassify(client: TestClient, db_session: Session) -> None:
@@ -305,4 +406,4 @@ def test_patch_and_delete_reclassify(client: TestClient, db_session: Session) ->
     assert deleted.json()["reclass_updated"] == 1
     listed = client.get("/transactions", params={"account_id": account_id}).json()
     assert listed[0]["category_normalized"] is None
-    assert client.get("/mappings").json() == []
+    assert _category_mappings(client) == []

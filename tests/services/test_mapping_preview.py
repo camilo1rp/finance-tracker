@@ -520,7 +520,7 @@ def test_preview_validation_excludes_invalid_and_continues(db_session: Session) 
         ),
     )
     assert preview.validation_errors == [
-        "op 1: merchant only valid for category",
+        "op 1: merchant only valid for category or transaction_type",
         "op 3: canonical_value must be a TransactionType",
     ]
     assert len(preview.ops) == 1
@@ -535,3 +535,85 @@ def test_preview_missing_mapping_id_is_validation_error(db_session: Session) -> 
     )
     assert preview.validation_errors == ["op 1: mapping 999 not found"]
     assert preview.ops == []
+
+
+def test_preview_type_merchant_scope_only_hits_matching_merchant(
+    db_session: Session,
+) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "WESTERN UNION CAPTURE 623 WEB ID: 9",
+        transaction_type="SPEND",
+        raw_type="MISC_DEBIT",
+        merchant_raw="WESTERN UNION CAPTURE 623 WEB ID: 9",
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "Woodlake Op RENT",
+        transaction_type="SPEND",
+        raw_type="MISC_DEBIT",
+        merchant_raw="Woodlake Op RENT 270209230 WEB ID: 1861072180",
+    )
+    preview = preview_mappings(
+        db_session,
+        _plan(
+            _create(
+                kind="transaction_type",
+                raw_value="MISC_DEBIT",
+                canonical_value="TRANSFER",
+                account_id=account.id,
+                merchant="Western Union",
+            ),
+            account_id=account.id,
+        ),
+    )
+    assert preview.validation_errors == []
+    assert preview.ops[0].would_change == 1
+    assert preview.ops[0].samples[0].description == "WESTERN UNION CAPTURE 623 WEB ID: 9"
+    assert preview.ops[0].samples[0].new_effective == "TRANSFER"
+
+
+def test_preview_merchant_raw_prefix_covers_variants(db_session: Session) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "wu-a",
+        merchant_raw="WESTERN UNION CAPTURE 623 WEB ID: 9",
+        merchant_normalized=None,
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "wu-b",
+        merchant_raw="WESTERN UNION CAPTURE 611 WEB ID: 9",
+        merchant_normalized=None,
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "rent",
+        merchant_raw="Woodlake Op RENT 270209230 WEB ID: 1861072180",
+        merchant_normalized=None,
+    )
+    preview = preview_mappings(
+        db_session,
+        _plan(
+            _create(
+                kind="merchant",
+                raw_value="Western Union",
+                canonical_value="Western Union",
+                account_id=account.id,
+            ),
+            account_id=account.id,
+        ),
+    )
+    assert preview.validation_errors == []
+    assert preview.ops[0].would_change == 2
+    assert {sample.description for sample in preview.ops[0].samples} == {
+        "wu-a",
+        "wu-b",
+    }

@@ -3,7 +3,7 @@ from datetime import date
 from decimal import Decimal
 
 from app.domain.classification import TransactionType
-from app.domain.dedupe import compute_dedupe_hash, split_new_and_duplicates
+from app.domain.dedupe import assign_dedupe_hashes, compute_dedupe_hash, split_new_and_duplicates
 from app.domain.transaction import CanonicalTransaction
 
 
@@ -48,3 +48,12 @@ def test_split_new_and_duplicates_including_within_batch() -> None:
     again = split_new_and_duplicates([first, other], existing_hashes={first.dedupe_hash})
     assert again.new == [other]
     assert again.duplicates == [first]
+
+
+def test_assign_dedupe_hashes_allow_duplicates_disambiguates() -> None:
+    first, second = assign_dedupe_hashes([_txn(), _txn()], allow_duplicates=True)
+    assert first.dedupe_hash == compute_dedupe_hash(_txn())
+    assert second.dedupe_hash != first.dedupe_hash
+
+    skipped = assign_dedupe_hashes([_txn(), _txn()], allow_duplicates=False)
+    assert skipped[0].dedupe_hash == skipped[1].dedupe_hash

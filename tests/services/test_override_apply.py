@@ -39,7 +39,7 @@ def _txn(db: Session, account_id: int, suffix: str, **kwargs) -> Transaction:
         account_id=account_id,
         transaction_date=date(2024, 6, 1),
         description=suffix,
-        amount=Decimal("10.00"),
+        amount=Decimal("-10.00"),
         transaction_type="SPEND",
         is_spend=True,
         category_raw="Shopping",

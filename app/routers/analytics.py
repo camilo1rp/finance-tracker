@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_session
-from app.schemas import GroupSummary, MerchantSummary, TotalOut, TransactionOut, UnmappedValuesOut
+from app.schemas import CashFlowOut, GroupSummary, MerchantSummary, TotalOut, TransactionOut, UnmappedValuesOut
 from app.services import analytics_service
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
@@ -22,6 +22,7 @@ def summary(
     owner_id: int | None = None,
     merchant: str | None = None,
     spend_only: bool = True,
+    transaction_type: str | None = None,
     db: Session = Depends(get_session),
 ) -> list[GroupSummary]:
     return analytics_service.summarize(
@@ -33,6 +34,7 @@ def summary(
         group_by,
         spend_only,
         merchant,
+        transaction_type,
     )
 
 
@@ -44,6 +46,7 @@ def by_category(
     owner_id: int | None = None,
     merchant: str | None = None,
     spend_only: bool = True,
+    transaction_type: str | None = None,
     db: Session = Depends(get_session),
 ) -> list[GroupSummary]:
     return analytics_service.summarize(
@@ -55,6 +58,7 @@ def by_category(
         "category",
         spend_only,
         merchant,
+        transaction_type,
     )
 
 
@@ -66,6 +70,7 @@ def by_owner(
     owner_id: int | None = None,
     merchant: str | None = None,
     spend_only: bool = True,
+    transaction_type: str | None = None,
     db: Session = Depends(get_session),
 ) -> list[GroupSummary]:
     return analytics_service.summarize(
@@ -77,6 +82,7 @@ def by_owner(
         "owner",
         spend_only,
         merchant,
+        transaction_type,
     )
 
 
@@ -88,6 +94,7 @@ def by_month(
     owner_id: int | None = None,
     merchant: str | None = None,
     spend_only: bool = True,
+    transaction_type: str | None = None,
     db: Session = Depends(get_session),
 ) -> list[GroupSummary]:
     return analytics_service.summarize(
@@ -99,6 +106,7 @@ def by_month(
         "month",
         spend_only,
         merchant,
+        transaction_type,
     )
 
 
@@ -110,10 +118,38 @@ def total(
     owner_id: int | None = None,
     merchant: str | None = None,
     spend_only: bool = True,
+    transaction_type: str | None = None,
     db: Session = Depends(get_session),
 ) -> TotalOut:
     return analytics_service.get_total(
-        db, date_from, date_to, account_id, owner_id, spend_only, merchant
+        db,
+        date_from,
+        date_to,
+        account_id,
+        owner_id,
+        spend_only,
+        merchant,
+        transaction_type,
+    )
+
+
+@router.get("/cash-flow", response_model=CashFlowOut)
+def cash_flow(
+    date_from: date | None = None,
+    date_to: date | None = None,
+    account_id: int | None = None,
+    owner_id: int | None = None,
+    merchant: str | None = None,
+    db: Session = Depends(get_session),
+) -> CashFlowOut:
+    """Household cash-flow by effective type.
+
+    net = income + refunds - spend - fees. Excludes transfers and other
+    (ADJUSTMENT, UNKNOWN). Depository outflows that fund card payments may
+    appear as SPEND until overridden — prefer account_id for one account.
+    """
+    return analytics_service.cash_flow(
+        db, date_from, date_to, account_id, owner_id, merchant
     )
 
 
@@ -125,11 +161,20 @@ def top_merchants(
     owner_id: int | None = None,
     merchant: str | None = None,
     spend_only: bool = True,
+    transaction_type: str | None = None,
     limit: int = Query(default=10, ge=1),
     db: Session = Depends(get_session),
 ) -> list[MerchantSummary]:
     return analytics_service.top_merchants(
-        db, date_from, date_to, account_id, owner_id, spend_only, limit, merchant
+        db,
+        date_from,
+        date_to,
+        account_id,
+        owner_id,
+        spend_only,
+        limit,
+        merchant,
+        transaction_type,
     )
 
 
@@ -141,11 +186,20 @@ def largest(
     owner_id: int | None = None,
     merchant: str | None = None,
     spend_only: bool = True,
+    transaction_type: str | None = None,
     limit: int = Query(default=10, ge=1),
     db: Session = Depends(get_session),
 ) -> list[TransactionOut]:
     return analytics_service.largest_transactions(
-        db, date_from, date_to, account_id, owner_id, spend_only, limit, merchant
+        db,
+        date_from,
+        date_to,
+        account_id,
+        owner_id,
+        spend_only,
+        limit,
+        merchant,
+        transaction_type,
     )
 
 

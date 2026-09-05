@@ -3,7 +3,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_session
-from app.domain.classification import NormalizationKind, TransactionType, clean_raw_value
+from app.domain.classification import (
+    NormalizationKind,
+    TransactionType,
+    allows_merchant_scope,
+    clean_raw_value,
+)
 from app.models import Account, NormalizationMapping
 from app.schemas import (
     ApplyResult,
@@ -66,11 +71,16 @@ def create_mapping(
     payload.raw_value is passed through clean_raw_value() before storage,
     so it's stored the same way DbNormalizationLookup will look it up
     (trimmed, lowercased) -- "Sale", "sale", " Sale " all collapse to one rule.
-    merchant is allowed only on kind=category (cleaned the same way);
-    omitted means the category rule applies to every merchant.
+    merchant is allowed on kind=category and kind=transaction_type
+    (cleaned the same way); omitted means the rule applies to every merchant.
     """
     kind = _validate_kind(payload.kind)
     if kind is NormalizationKind.TRANSACTION_TYPE:
+        if payload.canonical_value == "PAYMENT":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="PAYMENT is deprecated; use TRANSFER or INCOME",
+            )
         try:
             TransactionType(payload.canonical_value)
         except ValueError:
@@ -81,10 +91,10 @@ def create_mapping(
 
     cleaned_merchant = None
     if payload.merchant is not None and payload.merchant.strip():
-        if kind is not NormalizationKind.CATEGORY:
+        if not allows_merchant_scope(kind):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="merchant scope is only allowed on category mappings",
+                detail="merchant scope is only allowed on category or transaction_type mappings",
             )
         cleaned_merchant = clean_raw_value(payload.merchant)
 

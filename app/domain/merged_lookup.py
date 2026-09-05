@@ -9,7 +9,14 @@ refs (`proposed:` or `create:`).
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from app.domain.classification import NormalizationKind, NormalizationLookup
+from app.domain.classification import (
+    NormalizationKind,
+    NormalizationLookup,
+    allows_merchant_scope,
+    allows_raw_prefix,
+    merchant_scope_matches,
+    space_bounded_prefix_match,
+)
 
 
 @dataclass(frozen=True)
@@ -18,7 +25,7 @@ class RuleSpec:
     raw_value: str  # already cleaned (trim + lowercase)
     canonical_value: str
     account_id: int | None
-    merchant: str | None  # category kind only; None = global merchant scope
+    merchant: str | None  # category / transaction_type; None = all merchants
     ref: str  # "db:<mapping_id>", "create:<index>", "update:<index>", or "proposed:<index>"
 
 
@@ -78,16 +85,18 @@ class MergedNormalizationLookup(NormalizationLookup):
     ) -> RuleMatch | None:
         kind_value = kind.value
         merchant = _scope_merchant(merchant)
-        if kind is NormalizationKind.CATEGORY:
+        if allows_merchant_scope(kind):
             if merchant is not None:
-                hit = self._find(kind_value, raw_value, account_id, merchant)
+                hit = self._best_merchant_scoped(
+                    kind, raw_value, account_id, merchant
+                )
                 if hit is not None:
                     return RuleMatch(hit.canonical_value, hit.ref)
             hit = self._find(kind_value, raw_value, account_id, None)
             if hit is not None:
                 return RuleMatch(hit.canonical_value, hit.ref)
             if merchant is not None:
-                hit = self._find(kind_value, raw_value, None, merchant)
+                hit = self._best_merchant_scoped(kind, raw_value, None, merchant)
                 if hit is not None:
                     return RuleMatch(hit.canonical_value, hit.ref)
             hit = self._find(kind_value, raw_value, None, None)
@@ -98,9 +107,17 @@ class MergedNormalizationLookup(NormalizationLookup):
         hit = self._find(kind_value, raw_value, account_id, None)
         if hit is not None:
             return RuleMatch(hit.canonical_value, hit.ref)
+        if allows_raw_prefix(kind):
+            hit = self._best_raw_prefix(kind, raw_value, account_id)
+            if hit is not None:
+                return RuleMatch(hit.canonical_value, hit.ref)
         hit = self._find(kind_value, raw_value, None, None)
         if hit is not None:
             return RuleMatch(hit.canonical_value, hit.ref)
+        if allows_raw_prefix(kind):
+            hit = self._best_raw_prefix(kind, raw_value, None)
+            if hit is not None:
+                return RuleMatch(hit.canonical_value, hit.ref)
         return None
 
     def _find(
@@ -113,3 +130,46 @@ class MergedNormalizationLookup(NormalizationLookup):
         return self._by_scope.get(
             (kind, raw_value, account_id, _scope_merchant(merchant))
         )
+
+    def _best_merchant_scoped(
+        self,
+        kind: NormalizationKind,
+        raw_value: str,
+        account_id: int | None,
+        row_merchant: str,
+    ) -> RuleSpec | None:
+        exact = self._find(kind.value, raw_value, account_id, row_merchant)
+        if exact is not None:
+            return exact
+        if kind is not NormalizationKind.TRANSACTION_TYPE:
+            return None
+        matches = [
+            rule
+            for rule in self._by_scope.values()
+            if rule.kind == kind.value
+            and rule.raw_value == raw_value
+            and rule.account_id == account_id
+            and rule.merchant is not None
+            and merchant_scope_matches(row_merchant, rule.merchant, kind)
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda rule: len(rule.merchant or ""))
+
+    def _best_raw_prefix(
+        self,
+        kind: NormalizationKind,
+        raw_value: str,
+        account_id: int | None,
+    ) -> RuleSpec | None:
+        matches = [
+            rule
+            for rule in self._by_scope.values()
+            if rule.kind == kind.value
+            and rule.account_id == account_id
+            and rule.merchant is None
+            and space_bounded_prefix_match(raw_value, rule.raw_value)
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda rule: len(rule.raw_value))

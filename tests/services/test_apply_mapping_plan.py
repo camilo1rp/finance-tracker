@@ -176,7 +176,7 @@ def test_apply_rejects_invalid_plan(db_session: Session) -> None:
                 ]
             ),
         )
-    assert "merchant only valid for category" in str(exc.value)
+    assert "merchant only valid for category or transaction_type" in str(exc.value)
     assert db_session.scalars(select(NormalizationMapping)).all() == []
 
 

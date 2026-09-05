@@ -11,16 +11,17 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.domain.classification import (
+    AccountKind,
     NormalizationLookup,
     TransactionType,
     classify_category,
     classify_merchant,
     classify_owner,
-    classify_transaction_type,
 )
-from app.domain.mapping import ImportMapping, SignConvention
+from app.domain.mapping import ImportMapping
 from app.domain.merchant import extract_merchant, resolved_merchant
 from app.domain.transaction import CanonicalTransaction, UnmappedValues
+from app.domain.transaction_type_resolver import resolve_transaction_type
 
 _DATE_FORMATS = (
     "%Y-%m-%d",
@@ -74,34 +75,19 @@ def _parse_amount(value: Any) -> Decimal:
         raise ValueError(f"unrecognized amount: {value!r}") from exc
 
 
-def _type_from_sign(amount: Decimal, convention: SignConvention) -> TransactionType:
-    if convention is SignConvention.NEGATIVE_IS_SPEND:
-        return TransactionType.SPEND if amount < 0 else TransactionType.PAYMENT
-    return TransactionType.SPEND if amount > 0 else TransactionType.PAYMENT
-
-
 def normalize_row(
     row: dict[str, Any],
     mapping: ImportMapping,
     account_id: int,
     default_owner: str | None,
     lookup: NormalizationLookup,
+    account_kind: AccountKind | str = AccountKind.DEPOSITORY,
 ) -> CanonicalTransaction:
     """
     Convert a single raw row into a CanonicalTransaction.
 
-    Steps:
-      1. Extract date/description/amount/category_raw/raw_type/owner_raw
-         per `mapping`'s column names.
-      2. transaction_type = classify_transaction_type(raw_type, lookup, account_id)
-         if mapping.type_col is set; else derive SPEND/PAYMENT from
-         mapping.sign_convention against the amount's sign.
-      3. is_spend = transaction_type == TransactionType.SPEND
-      4. merchant_raw from merchant_col or extract_merchant(description);
-         merchant_normalized = classify_merchant(...)
-      5. category_normalized = classify_category(..., resolved merchant)
-      6. owner = classify_owner(owner_raw, lookup, account_id) if owner_col
-         set and present, else default_owner.
+    Type resolution: mapped raw_type wins; else sign+account_kind when
+    sign_convention is set; else UNKNOWN.
     """
     date_value = _cell(row, mapping.date_col)
     description_value = _cell(row, mapping.description_col)
@@ -118,14 +104,9 @@ def normalize_row(
     description = str(description_value).strip()
 
     raw_type = _cell(row, mapping.type_col) if mapping.type_col else None
-    if mapping.type_col:
-        raw_type_str = None if raw_type is None else str(raw_type)
-        transaction_type = classify_transaction_type(raw_type_str, lookup, account_id)
-    else:
-        raw_type_str = None
-        if mapping.sign_convention is None:
-            raise ValueError("ImportMapping requires type_col or sign_convention")
-        transaction_type = _type_from_sign(amount, mapping.sign_convention)
+    raw_type_str = None if raw_type is None else str(raw_type)
+    if mapping.type_col is None and mapping.sign_convention is None:
+        raise ValueError("ImportMapping requires type_col or sign_convention")
 
     category_raw_value = _cell(row, mapping.category_col) if mapping.category_col else None
     category_raw = None if category_raw_value is None else str(category_raw_value).strip()
@@ -147,11 +128,22 @@ def normalize_row(
     else:
         merchant_raw = extract_merchant(description)
     merchant_normalized = classify_merchant(merchant_raw, lookup, account_id)
+    merchant_for_type = resolved_merchant(merchant_raw, merchant_normalized)
+
+    transaction_type = resolve_transaction_type(
+        raw_type_str,
+        amount,
+        mapping,
+        account_kind,
+        lookup,
+        account_id,
+        merchant=merchant_for_type,
+    )
     category_normalized = classify_category(
         category_raw,
         lookup,
         account_id,
-        merchant=resolved_merchant(merchant_raw, merchant_normalized),
+        merchant=merchant_for_type,
     )
 
     return CanonicalTransaction(
@@ -178,6 +170,7 @@ def normalize_rows(
     account_id: int,
     default_owner: str | None,
     lookup: NormalizationLookup,
+    account_kind: AccountKind | str = AccountKind.DEPOSITORY,
 ) -> tuple[list[CanonicalTransaction], UnmappedValues, list[str]]:
     """
     Applies normalize_row across all rows. Row-level failures are collected,
@@ -194,7 +187,9 @@ def normalize_rows(
 
     for index, row in enumerate(rows):
         try:
-            txn = normalize_row(row, mapping, account_id, default_owner, lookup)
+            txn = normalize_row(
+                row, mapping, account_id, default_owner, lookup, account_kind
+            )
         except (ValueError, KeyError, TypeError) as exc:
             errors.append(f"row {index}: {exc}")
             continue

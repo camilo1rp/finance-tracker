@@ -105,11 +105,14 @@ def _json(response) -> Any:
         return response.text
 
 
-def _import_file(client, account_id: int, filename: str):
+def _import_file(client, account_id: int, filename: str, *, allow_duplicates: bool = False):
     path = FIXTURES / filename
+    params: dict = {"account_id": account_id}
+    if allow_duplicates:
+        params["allow_duplicates"] = True
     return client.post(
         "/imports",
-        params={"account_id": account_id},
+        params=params,
         files={"file": (filename, path.read_bytes(), "text/csv")},
     )
 
@@ -167,6 +170,7 @@ def run(client, suffix: str, report: Report) -> None:
             "name": f"Chase Sapphire{suffix}",
             "last4": "1111",
             "default_owner_id": camilo_id,
+            "account_kind": "credit_card",
             "default_mapping": chase_mapping,
         },
     )
@@ -179,6 +183,7 @@ def run(client, suffix: str, report: Report) -> None:
             "name": f"Apple Card{suffix}",
             "last4": "2222",
             "default_owner_id": camilo_id,
+            "account_kind": "credit_card",
             "default_mapping": apple_mapping,
         },
     )
@@ -191,6 +196,7 @@ def run(client, suffix: str, report: Report) -> None:
             "name": f"Checking{suffix}",
             "last4": "3333",
             "default_owner_id": camilo_id,
+            "account_kind": "depository",
             "default_mapping": debit_mapping,
         },
     )
@@ -209,6 +215,7 @@ def run(client, suffix: str, report: Report) -> None:
             "name": "Ghost",
             "last4": "0000",
             "default_owner_id": 999999,
+            "account_kind": "credit_card",
             "default_mapping": chase_mapping,
         },
     )
@@ -232,7 +239,6 @@ def run(client, suffix: str, report: Report) -> None:
     mapping_payloads = [
         {"kind": "transaction_type", "raw_value": "Sale", "canonical_value": "SPEND"},
         {"kind": "transaction_type", "raw_value": "Return", "canonical_value": "REFUND"},
-        {"kind": "transaction_type", "raw_value": "Payment", "canonical_value": "PAYMENT"},
         {"kind": "transaction_type", "raw_value": "Purchase", "canonical_value": "SPEND"},
         {"kind": "category", "raw_value": "Food & Drink", "canonical_value": "Dining"},
         {"kind": "category", "raw_value": "Shopping", "canonical_value": "Shopping"},
@@ -375,6 +381,12 @@ def run(client, suffix: str, report: Report) -> None:
             report.expect_eq("dupes inserted", body["inserted"], 2)
             report.expect_eq("dupes duplicates_skipped", body["duplicates_skipped"], 1)
 
+        allowed = _import_file(client, chase_id, "dupes.csv", allow_duplicates=True)
+        if report.expect_status("POST /imports dupes.csv allow_duplicates", allowed, 200):
+            body = allowed.json()
+            report.expect_eq("dupes allow inserted", body["inserted"], 1)
+            report.expect_eq("dupes allow duplicates_skipped", body["duplicates_skipped"], 2)
+
     if apple_id is not None:
         apple_imp = _import_file(client, apple_id, "apple_card.csv")
         if report.expect_status("POST /imports apple_card.csv", apple_imp, 200):
@@ -459,7 +471,7 @@ def run(client, suffix: str, report: Report) -> None:
         report.expect_eq("GROCERY is_spend", grocery["is_spend"], True)
         report.expect_eq("GROCERY type SPEND", grocery["transaction_type"], "SPEND")
         report.expect_eq("PAYCHECK is_spend", paycheck["is_spend"], False)
-        report.expect_eq("PAYCHECK type PAYMENT", paycheck["transaction_type"], "PAYMENT")
+        report.expect_eq("PAYCHECK type INCOME", paycheck["transaction_type"], "INCOME")
         report.expect_eq("ATM REVERSAL is_spend", reversal["is_spend"], True)
         report.expect_eq("PAYCHECK amount", str(paycheck["amount"]), "1234.56")
         report.expect_eq("GROCERY amount", str(grocery["amount"]), "-54.32")

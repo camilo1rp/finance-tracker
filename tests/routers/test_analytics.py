@@ -95,7 +95,7 @@ def test_spend_only_excludes_payments_and_refunds(db_session: Session) -> None:
         account.id,
         "pay",
         amount=Decimal("100.00"),
-        transaction_type="PAYMENT",
+        transaction_type="INCOME",
         is_spend=False,
     )
     _add_txn(
@@ -107,10 +107,20 @@ def test_spend_only_excludes_payments_and_refunds(db_session: Session) -> None:
         is_spend=False,
     )
     spend = get_total(db_session, None, None, None, None, spend_only=True)
+    assert spend["purchases"] == Decimal("10.00")
+    assert spend["refunds"] == Decimal("4.00")
+    assert spend["spend"] == Decimal("6.00")
+    assert spend["total"] == Decimal("6.00")
     assert spend["count"] == 1
-    assert spend["total"] == Decimal("10.00")
+    assert spend["net_cash_flow"] == Decimal("94.00")
     all_types = get_total(db_session, None, None, None, None, spend_only=False)
-    assert all_types["count"] == 3
+    assert all_types["spend"] == Decimal("6.00")
+    assert all_types["net_cash_flow"] == Decimal("94.00")
+    assert {row["transaction_type"] for row in all_types["by_type"]} == {
+        "SPEND",
+        "INCOME",
+        "REFUND",
+    }
 
 
 def test_mixed_sign_spends_use_abs(db_session: Session) -> None:
@@ -165,15 +175,70 @@ def test_unmapped_lists_raw_values(db_session: Session) -> None:
 
 def test_get_total_average_and_zero_rows(db_session: Session) -> None:
     empty = get_total(db_session, None, None, None, None)
-    assert empty == {"total": Decimal("0.00"), "count": 0, "average": Decimal("0.00")}
+    assert empty["total"] == Decimal("0.00")
+    assert empty["count"] == 0
+    assert empty["average"] == Decimal("0.00")
+    assert empty["by_type"] == []
+    assert empty["purchases"] == Decimal("0.00")
+    assert empty["refunds"] == Decimal("0.00")
+    assert empty["spend"] == Decimal("0.00")
+    assert empty["net_cash_flow"] == Decimal("0.00")
 
     _, account = _seed_account(db_session)
     _add_txn(db_session, account.id, "a", amount=Decimal("10.00"))
     _add_txn(db_session, account.id, "b", amount=Decimal("20.00"))
     totals = get_total(db_session, None, None, None, None)
+    assert totals["purchases"] == Decimal("30.00")
+    assert totals["refunds"] == Decimal("0.00")
+    assert totals["spend"] == Decimal("30.00")
+    assert totals["net_cash_flow"] == Decimal("-30.00")
     assert totals["total"] == Decimal("30.00")
     assert totals["count"] == 2
     assert totals["average"] == Decimal("15.00")
+    assert totals["by_type"] == [
+        {"transaction_type": "SPEND", "total": Decimal("30.00"), "count": 2}
+    ]
+
+
+def test_get_total_by_type_and_sign_convention(db_session: Session) -> None:
+    _, account = _seed_account(db_session)
+    account.default_mapping = {
+        **account.default_mapping,
+        "sign_convention": "negative_is_spend",
+    }
+    db_session.commit()
+
+    _add_txn(db_session, account.id, "spend-neg", amount=Decimal("-10.00"))
+    _add_txn(
+        db_session,
+        account.id,
+        "income",
+        amount=Decimal("100.00"),
+        transaction_type="INCOME",
+        is_spend=False,
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "refund",
+        amount=Decimal("5.00"),
+        transaction_type="REFUND",
+        is_spend=False,
+    )
+
+    body = get_total(db_session, None, None, account.id, None)
+    assert body["purchases"] == Decimal("10.00")
+    assert body["refunds"] == Decimal("5.00")
+    assert body["spend"] == Decimal("5.00")
+    assert body["net_cash_flow"] == Decimal("95.00")
+    assert body["total"] == Decimal("5.00")
+    assert body["count"] == 1
+    assert body["sign_convention"] == "negative_is_spend"
+    assert body["by_type"] == [
+        {"transaction_type": "INCOME", "total": Decimal("100.00"), "count": 1},
+        {"transaction_type": "REFUND", "total": Decimal("5.00"), "count": 1},
+        {"transaction_type": "SPEND", "total": Decimal("10.00"), "count": 1},
+    ]
 
 
 def test_invalid_group_by_is_422(client: TestClient) -> None:

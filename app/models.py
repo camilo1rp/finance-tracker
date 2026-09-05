@@ -52,6 +52,7 @@ class Account(Base):
     last4: Mapped[str] = mapped_column(String)
     default_owner_id: Mapped[int | None] = mapped_column(ForeignKey("owners.id"), nullable=True)
     source_format: Mapped[str] = mapped_column(String)  # "csv" (extensible: "pdf", "api")
+    account_kind: Mapped[str] = mapped_column(String, default="depository")
     default_mapping: Mapped[dict] = mapped_column(JSON)  # serialized ImportMapping
 
     default_owner: Mapped["Owner | None"] = relationship()
@@ -63,8 +64,11 @@ class NormalizationMapping(Base):
     Generic raw-value -> canonical-value lookup, shared by transaction_type,
     category, owner, and merchant classification. account_id NULL means a
     global rule; set means it overrides the global rule for that one account.
-    merchant is only used for kind=category: NULL applies to every merchant,
-    set applies only when the row's resolved merchant matches (cleaned).
+    merchant is used for kind=category and kind=transaction_type: NULL
+    applies to every merchant; set applies only when the row's resolved
+    merchant matches (cleaned). Type rules also accept a space-bounded
+    prefix so ACH labels like "western union capture 623…" hit
+    merchant=western union.
     """
     __tablename__ = "normalization_mappings"
     __table_args__ = (
@@ -110,6 +114,7 @@ class Transaction(Base):
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
 
     transaction_type: Mapped[str] = mapped_column(String)  # TransactionType enum value
+    type_override: Mapped[str | None] = mapped_column(String, nullable=True)
     is_spend: Mapped[bool] = mapped_column(Boolean)
     raw_type: Mapped[str | None] = mapped_column(String, nullable=True)
 
@@ -213,4 +218,9 @@ effective_merchant = case(
     (Transaction.merchant_override.isnot(None), Transaction.merchant_override),
     (Transaction.merchant_normalized.isnot(None), Transaction.merchant_normalized),
     else_=Transaction.merchant_raw,
+)
+
+effective_type = case(
+    (Transaction.type_override.isnot(None), Transaction.type_override),
+    else_=Transaction.transaction_type,
 )

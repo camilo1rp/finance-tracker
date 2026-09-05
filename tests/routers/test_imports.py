@@ -21,6 +21,7 @@ def _seed(client: TestClient) -> tuple[int, int]:
         json={
             "name": "Shared Card",
             "last4": "4242",
+            "account_kind": "credit_card",
             "default_owner_id": owner["id"],
             "default_mapping": ACCOUNT_MAPPING,
         },
@@ -28,7 +29,7 @@ def _seed(client: TestClient) -> tuple[int, int]:
     for payload in (
         {"kind": "transaction_type", "raw_value": "Sale", "canonical_value": "SPEND"},
         {"kind": "transaction_type", "raw_value": "Return", "canonical_value": "REFUND"},
-        {"kind": "transaction_type", "raw_value": "Payment", "canonical_value": "PAYMENT"},
+        {"kind": "transaction_type", "raw_value": "Payment", "canonical_value": "TRANSFER"},
         {"kind": "category", "raw_value": "Food & Drink", "canonical_value": "Dining"},
         {
             "kind": "owner",
@@ -95,6 +96,58 @@ def test_import_pipeline_dedupe_filter_and_patch(client: TestClient) -> None:
 
     filtered = client.get("/transactions", params={"category": "Cafes"})
     assert [row["id"] for row in filtered.json()] == [coffee["id"]]
+
+
+def _import_csv(client: TestClient, account_id: int, csv: str, *, allow_duplicates: bool = False):
+    params: dict = {"account_id": account_id}
+    if allow_duplicates:
+        params["allow_duplicates"] = True
+    return client.post(
+        "/imports",
+        params=params,
+        files={"file": ("dupes.csv", csv.encode(), "text/csv")},
+    )
+
+
+def test_import_skips_within_file_duplicates_by_default(client: TestClient) -> None:
+    _, account_id = _seed(client)
+    csv = (
+        "Date,Description,Amount,Type,Category,Purchased By\n"
+        "2024-03-01,Coffee Shop,4.50,Sale,Food & Drink,John\n"
+        "2024-03-01,Coffee Shop,4.50,Sale,Food & Drink,John\n"
+        "2024-03-02,Refund,12.00,Return,Shopping,John\n"
+    )
+    response = _import_csv(client, account_id, csv)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["inserted"] == 2
+    assert body["duplicates_skipped"] == 1
+
+
+def test_import_allow_duplicates_inserts_identical_rows(client: TestClient) -> None:
+    _, account_id = _seed(client)
+    csv = (
+        "Date,Description,Amount,Type,Category,Purchased By\n"
+        "2024-03-01,Coffee Shop,4.50,Sale,Food & Drink,John\n"
+        "2024-03-01,Coffee Shop,4.50,Sale,Food & Drink,John\n"
+        "2024-03-02,Refund,12.00,Return,Shopping,John\n"
+    )
+    first = _import_csv(client, account_id, csv, allow_duplicates=True)
+    assert first.status_code == 200, first.text
+    assert first.json()["inserted"] == 3
+    assert first.json()["duplicates_skipped"] == 0
+
+    coffees = [
+        row
+        for row in client.get("/transactions", params={"account_id": account_id}).json()
+        if row["description"] == "Coffee Shop"
+    ]
+    assert len(coffees) == 2
+
+    replay = _import_csv(client, account_id, csv, allow_duplicates=True)
+    assert replay.status_code == 200
+    assert replay.json()["inserted"] == 0
+    assert replay.json()["duplicates_skipped"] == 3
 
 
 def test_import_unknown_account(client: TestClient) -> None:

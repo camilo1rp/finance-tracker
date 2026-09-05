@@ -15,12 +15,16 @@ from sqlalchemy.orm import Session
 from app.domain.classification import (
     NormalizationKind,
     TransactionType,
+    allows_merchant_scope,
+    allows_raw_prefix,
     classify_category,
     classify_merchant,
     classify_owner,
-    classify_transaction_type,
     clean_raw_value,
+    merchant_scope_matches,
+    space_bounded_prefix_match,
 )
+from app.domain.transaction_type_resolver import resolve_transaction_type
 from app.domain.merged_lookup import MergedNormalizationLookup, RuleMatch, RuleSpec
 from app.domain.merchant import resolved_merchant
 from app.models import (
@@ -49,7 +53,11 @@ from app.schemas import (
     UpdateMappingOp,
 )
 from app.services.analytics_service import unmapped_summary
-from app.services.ingest_service import _backfill_merchant_raw, run_reclassification
+from app.services.ingest_service import (
+    _backfill_merchant_raw,
+    mapping_from_stored,
+    run_reclassification,
+)
 
 _SAMPLE_CAP = 5
 _OpType = Literal["create", "update", "delete"]
@@ -159,8 +167,10 @@ def validate_create_op(db: Session, op: CreateMappingOp, index: int) -> str | No
         except ValueError:
             return f"op {index}: canonical_value must be a TransactionType"
     if op.merchant is not None and op.merchant.strip():
-        if kind is not NormalizationKind.CATEGORY:
-            return f"op {index}: merchant only valid for category"
+        if not allows_merchant_scope(kind):
+            return (
+                f"op {index}: merchant only valid for category or transaction_type"
+            )
     if not str(op.raw_value).strip():
         return f"op {index}: raw_value is empty"
     if op.account_id is not None and db.get(Account, op.account_id) is None:
@@ -425,12 +435,19 @@ def _rule_in_scope(
     raw = _row_raw(spec.kind, txn, merchant_raw)
     if raw is None or not str(raw).strip():
         return False
-    if clean_raw_value(str(raw)) != spec.raw_value:
-        return False
+    cleaned_raw = clean_raw_value(str(raw))
+    if cleaned_raw != spec.raw_value:
+        if not (
+            allows_raw_prefix(spec.kind)
+            and space_bounded_prefix_match(cleaned_raw, spec.raw_value)
+        ):
+            return False
     if spec.account_id is not None and txn.account_id != spec.account_id:
         return False
-    if spec.kind == "category" and spec.merchant is not None:
-        if resolved_merchant_cleaned != spec.merchant:
+    if spec.merchant is not None and allows_merchant_scope(spec.kind):
+        if not merchant_scope_matches(
+            resolved_merchant_cleaned, spec.merchant, spec.kind
+        ):
             return False
     return True
 
@@ -459,16 +476,6 @@ def _classify_row(
     if not merchant_raw:
         merchant_raw = _backfill_merchant_raw(txn, accounts.get(txn.account_id))
 
-    new_type = None
-    type_match: RuleMatch | None = None
-    if txn.raw_type:
-        new_type = classify_transaction_type(txn.raw_type, lookup, txn.account_id)
-        type_match = lookup.resolve_with_ref(
-            NormalizationKind.TRANSACTION_TYPE,
-            clean_raw_value(str(txn.raw_type)),
-            txn.account_id,
-        )
-
     new_owner_name = None
     owner_match: RuleMatch | None = None
     if txn.owner_raw:
@@ -494,6 +501,29 @@ def _classify_row(
     cleaned_resolved = (
         clean_raw_value(str(resolved)) if resolved and str(resolved).strip() else None
     )
+
+    new_type = None
+    type_match: RuleMatch | None = None
+    account = accounts.get(txn.account_id)
+    if account is not None:
+        mapping = mapping_from_stored(account.default_mapping)
+        new_type = resolve_transaction_type(
+            txn.raw_type,
+            txn.amount,
+            mapping,
+            account.account_kind,
+            lookup,
+            txn.account_id,
+            merchant=resolved,
+        )
+    if txn.raw_type:
+        type_match = lookup.resolve_with_ref(
+            NormalizationKind.TRANSACTION_TYPE,
+            clean_raw_value(str(txn.raw_type)),
+            txn.account_id,
+            cleaned_resolved,
+        )
+
     new_category = classify_category(
         txn.category_raw, lookup, txn.account_id, merchant=resolved
     )
@@ -670,6 +700,12 @@ def _accumulate_delete(
     if not counted:
         return
     if merged_match is None:
+        if (
+            acc.spec.kind == "transaction_type"
+            and merged.new_type is not None
+            and merged.new_type is not TransactionType.UNKNOWN
+        ):
+            return
         acc.would_become_unmapped += 1
         return
     fallback_id = _winning_db_id(merged_match)

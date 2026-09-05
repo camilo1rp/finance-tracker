@@ -20,6 +20,7 @@ def _account(client: TestClient) -> int:
         json={
             "name": "Card",
             "last4": "1111",
+            "account_kind": "credit_card",
             "default_owner_id": owner["id"],
             "default_mapping": {
                 "date_col": "Date",
@@ -117,16 +118,82 @@ def test_same_scope_prefers_db_even_if_proposed_listed_first() -> None:
     assert match.ref == "db:3"
 
 
-def test_non_category_account_then_global_ignores_merchant() -> None:
+def test_transaction_type_precedence_account_merchant_to_global() -> None:
+    lookup = MergedNormalizationLookup(
+        [
+            RuleSpec("transaction_type", "misc_debit", "SPEND", None, None, "db:1"),
+            RuleSpec(
+                "transaction_type", "misc_debit", "FEE", None, "western union", "db:2"
+            ),
+            RuleSpec("transaction_type", "misc_debit", "SPEND", 1, None, "db:3"),
+            RuleSpec(
+                "transaction_type",
+                "misc_debit",
+                "TRANSFER",
+                1,
+                "western union",
+                "db:4",
+            ),
+        ]
+    )
+    assert lookup.resolve(TYPE, "misc_debit", 1, "western union") == "TRANSFER"
+    assert lookup.resolve(TYPE, "misc_debit", 1, "woodlake op") == "SPEND"
+    assert lookup.resolve(TYPE, "misc_debit", 2, "western union") == "FEE"
+    assert lookup.resolve(TYPE, "misc_debit", 2, "woodlake op") == "SPEND"
+    assert (
+        lookup.resolve(
+            TYPE,
+            "misc_debit",
+            1,
+            "western union capture 623287974331123 web id: 9222993574",
+        )
+        == "TRANSFER"
+    )
+    assert lookup.resolve_with_ref(TYPE, "misc_debit", 1, "western union").ref == "db:4"
+
+
+def test_merchant_kind_raw_value_prefix() -> None:
+    lookup = MergedNormalizationLookup(
+        [
+            RuleSpec(
+                "merchant", "western union", "Western Union", 3, None, "db:1"
+            ),
+            RuleSpec("merchant", "marshalls", "Marshalls", None, None, "db:2"),
+            RuleSpec(
+                "merchant", "marshalls #59", "Marshalls 59", None, None, "db:3"
+            ),
+        ]
+    )
+    assert (
+        lookup.resolve(
+            MERCHANT,
+            "western union capture 623287974331123 web id: 9222993574",
+            3,
+        )
+        == "Western Union"
+    )
+    assert lookup.resolve(MERCHANT, "woodlake op rent", 3) is None
+    assert lookup.resolve(MERCHANT, "marshalls #59 9425 katy fwy", 1) == (
+        "Marshalls 59"
+    )
+    assert lookup.resolve(MERCHANT, "marshalls store 12", 1) == "Marshalls"
+    assert lookup.resolve_with_ref(
+        MERCHANT,
+        "western union capture 623 web id: 9",
+        3,
+    ).ref == "db:1"
+
+
+def test_owner_and_merchant_kinds_ignore_merchant_scope() -> None:
     lookup = MergedNormalizationLookup(
         [
             RuleSpec("transaction_type", "sale", "SPEND", None, None, "db:1"),
-            RuleSpec("transaction_type", "sale", "PAYMENT", 1, None, "db:2"),
+            RuleSpec("transaction_type", "sale", "TRANSFER", 1, None, "db:2"),
             RuleSpec("owner", "pat", "Pat Global", None, None, "db:3"),
             RuleSpec("merchant", "sbux", "Starbucks", 1, None, "proposed:0"),
         ]
     )
-    assert lookup.resolve(TYPE, "sale", 1) == "PAYMENT"
+    assert lookup.resolve(TYPE, "sale", 1) == "TRANSFER"
     assert lookup.resolve(TYPE, "sale", 2) == "SPEND"
     assert lookup.resolve(OWNER, "pat", 1) == "Pat Global"
     assert lookup.resolve(MERCHANT, "sbux", 1) == "Starbucks"
@@ -186,10 +253,21 @@ def test_merged_agrees_with_db_lookup_on_same_rules(
         json={
             "kind": "transaction_type",
             "raw_value": "Sale",
-            "canonical_value": "PAYMENT",
+            "canonical_value": "TRANSFER",
             "account_id": account_id,
         },
     )
+    scoped_type = client.post(
+        "/mappings",
+        json={
+            "kind": "transaction_type",
+            "raw_value": "Sale",
+            "canonical_value": "FEE",
+            "account_id": account_id,
+            "merchant": "Costco",
+        },
+    )
+    assert scoped_type.status_code == 201, scoped_type.text
 
     db_lookup = DbNormalizationLookup(db_session)
     merged = merged_lookup_from_db(
@@ -202,6 +280,8 @@ def test_merged_agrees_with_db_lookup_on_same_rules(
         (CATEGORY, "shopping", 999, "amazon"),
         (CATEGORY, "shopping", 999, None),
         (TYPE, "sale", account_id, None),
+        (TYPE, "sale", account_id, "costco"),
+        (TYPE, "sale", account_id, "amazon"),
         (TYPE, "sale", 999, None),
         (TYPE, "return", account_id, None),
     ]

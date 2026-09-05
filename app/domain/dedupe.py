@@ -7,7 +7,7 @@ so ingest_service can report "N inserted, M skipped" rather than silently
 swallowing conflicts or failing the whole batch on the first collision.
 """
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 
 from app.domain.transaction import CanonicalTransaction
@@ -21,6 +21,31 @@ def compute_dedupe_hash(txn: CanonicalTransaction) -> str:
         f"{txn.account_id}|{txn.transaction_date.isoformat()}|{amount}|{txn.description}"
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def assign_dedupe_hashes(
+    candidates: list[CanonicalTransaction],
+    *,
+    allow_duplicates: bool = False,
+) -> list[CanonicalTransaction]:
+    """Assign identity hashes. When allow_duplicates, later copies of the
+    same identity get `|occ=N` so they can persist under the unique constraint."""
+    counts: dict[str, int] = {}
+    assigned: list[CanonicalTransaction] = []
+    for txn in candidates:
+        base = compute_dedupe_hash(txn)
+        if not allow_duplicates:
+            assigned.append(replace(txn, dedupe_hash=base))
+            continue
+        n = counts.get(base, 0) + 1
+        counts[base] = n
+        digest = (
+            base
+            if n == 1
+            else hashlib.sha256(f"{base}|occ={n}".encode("utf-8")).hexdigest()
+        )
+        assigned.append(replace(txn, dedupe_hash=digest))
+    return assigned
 
 
 @dataclass(frozen=True)

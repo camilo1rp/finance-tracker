@@ -5,7 +5,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_session
+from app.domain.classification import TransactionType
 from app.models import Owner, Transaction, TransactionOverride, effective_category, effective_merchant
+from app.domain.transaction_type_resolver import is_effective_spend
 from app.schemas import ReclassifyResultOut, TransactionOut, TransactionPatch, UnmappedValuesOut
 from app.services.ingest_service import AccountNotFoundError, reclassify_transactions
 
@@ -97,6 +99,17 @@ def patch_transaction(
                 detail=f"owner {payload.owner_id} not found",
             )
         txn.owner_id = payload.owner_id
+    if "type_override" in payload.model_fields_set:
+        if payload.type_override is not None:
+            try:
+                TransactionType(payload.type_override)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="type_override must be a TransactionType",
+                ) from None
+        txn.type_override = payload.type_override
+        txn.is_spend = is_effective_spend(txn.transaction_type, txn.type_override)
     db.commit()
     db.refresh(txn)
     return txn

@@ -1,0 +1,5 @@
+# Sibling to legacy apple_card.csv — includes Payment/Credit rows with Apple sign convention.
+Transaction Date,Description,Amount,Type,Category,Purchased By,Merchant
+2024-06-10,WHOLE FOODS,67.20,Purchase,Groceries,Camilo,Whole Foods
+2024-06-11,CARD PAYMENT,-500.00,Payment,,Camilo,
+2024-06-12,STATEMENT CREDIT,-9.99,Credit,Other,Camilo,Apple

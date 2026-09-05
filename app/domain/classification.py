@@ -15,10 +15,18 @@ from typing import Optional
 
 class TransactionType(str, Enum):
     SPEND = "SPEND"
+    INCOME = "INCOME"
+    TRANSFER = "TRANSFER"
     REFUND = "REFUND"
-    PAYMENT = "PAYMENT"
+    PAYMENT = "PAYMENT"  # legacy only; resolver never emits; migrated on startup
+    FEE = "FEE"
     ADJUSTMENT = "ADJUSTMENT"
     UNKNOWN = "UNKNOWN"
+
+
+class AccountKind(str, Enum):
+    CREDIT_CARD = "credit_card"
+    DEPOSITORY = "depository"
 
 
 class NormalizationKind(str, Enum):
@@ -55,11 +63,52 @@ class NormalizationLookup(ABC):
         `raw_value` (and `merchant`, when used) are expected already cleaned
         via clean_raw_value() -- implementations should not re-clean.
 
-        For kind=category, `merchant` is the cleaned resolved merchant.
-        Precedence: account+merchant, account, global+merchant, global.
-        Other kinds ignore `merchant`.
+        For kind=category and kind=transaction_type, `merchant` is the
+        cleaned resolved merchant. Precedence: account+merchant, account,
+        global+merchant, global. Other kinds ignore `merchant`.
         """
         raise NotImplementedError
+
+
+def allows_merchant_scope(kind: NormalizationKind | str) -> bool:
+    value = kind.value if isinstance(kind, NormalizationKind) else kind
+    return value in (
+        NormalizationKind.CATEGORY.value,
+        NormalizationKind.TRANSACTION_TYPE.value,
+    )
+
+
+def allows_raw_prefix(kind: NormalizationKind | str) -> bool:
+    value = kind.value if isinstance(kind, NormalizationKind) else kind
+    return value == NormalizationKind.MERCHANT.value
+
+
+def space_bounded_prefix_match(value: str | None, prefix: str) -> bool:
+    """Exact match, or ``value`` starts with ``prefix`` plus a space."""
+    if value is None:
+        return False
+    return value == prefix or value.startswith(prefix + " ")
+
+
+def merchant_scope_matches(
+    resolved_cleaned: str | None,
+    rule_merchant: str,
+    kind: NormalizationKind | str,
+) -> bool:
+    """Exact cleaned match, or type-only space-bounded prefix.
+
+    Type prefix lets merchant=western union hit
+    ``western union capture 623… web id: …`` ACH labels without a
+    per-row merchant alias.
+    """
+    if resolved_cleaned is None:
+        return False
+    if resolved_cleaned == rule_merchant:
+        return True
+    value = kind.value if isinstance(kind, NormalizationKind) else kind
+    if value != NormalizationKind.TRANSACTION_TYPE.value:
+        return False
+    return space_bounded_prefix_match(resolved_cleaned, rule_merchant)
 
 
 def clean_raw_value(raw_value: str) -> str:
@@ -77,15 +126,21 @@ def classify_transaction_type(
     raw_type: Optional[str],
     lookup: NormalizationLookup,
     account_id: int,
+    merchant: Optional[str] = None,
 ) -> TransactionType:
     """Cleans raw_type via clean_raw_value(), resolves via lookup; defaults
-    to UNKNOWN if unmapped or raw_type is absent."""
+    to UNKNOWN if unmapped or raw_type is absent. `merchant` is the resolved
+    merchant label (override > normalized > raw); it is cleaned here."""
     if raw_type is None or not str(raw_type).strip():
         return TransactionType.UNKNOWN
+    cleaned_merchant = None
+    if merchant is not None and str(merchant).strip():
+        cleaned_merchant = clean_raw_value(str(merchant))
     resolved = lookup.resolve(
         NormalizationKind.TRANSACTION_TYPE,
         clean_raw_value(str(raw_type)),
         account_id,
+        cleaned_merchant,
     )
     if resolved is None:
         return TransactionType.UNKNOWN

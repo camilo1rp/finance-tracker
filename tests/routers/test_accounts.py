@@ -15,6 +15,7 @@ def test_create_and_list_accounts(client: TestClient) -> None:
         json={
             "name": "Chase Sapphire",
             "last4": "1234",
+            "account_kind": "credit_card",
             "default_owner_id": owner["id"],
             "default_mapping": MAPPING,
         },
@@ -23,6 +24,7 @@ def test_create_and_list_accounts(client: TestClient) -> None:
     body = created.json()
     assert body["name"] == "Chase Sapphire"
     assert body["last4"] == "1234"
+    assert body["account_kind"] == "credit_card"
     assert body["default_owner_id"] == owner["id"]
     assert body["source_format"] == "csv"
 
@@ -37,11 +39,24 @@ def test_create_account_unknown_owner(client: TestClient) -> None:
         json={
             "name": "Card",
             "last4": "0000",
+            "account_kind": "credit_card",
             "default_owner_id": 99,
             "default_mapping": MAPPING,
         },
     )
     assert response.status_code == 404
+
+
+def test_create_account_requires_account_kind(client: TestClient) -> None:
+    response = client.post(
+        "/accounts",
+        json={
+            "name": "Card",
+            "last4": "0000",
+            "default_mapping": MAPPING,
+        },
+    )
+    assert response.status_code == 422
 
 
 def test_create_account_rejects_mapping_without_type_or_sign(client: TestClient) -> None:
@@ -50,6 +65,7 @@ def test_create_account_rejects_mapping_without_type_or_sign(client: TestClient)
         json={
             "name": "Card",
             "last4": "0000",
+            "account_kind": "depository",
             "default_mapping": {
                 "date_col": "Date",
                 "description_col": "Description",

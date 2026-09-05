@@ -1,0 +1,5 @@
+# Chase checking export shape (Type column present; no LOAN_PMT in default QA path).
+Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #
+2024-06-01,DIRECT DEP,PAYCHECK,1234.56,ACH_CREDIT,5000.00,
+2024-06-02,TRANSFER,TO SAVINGS,-500.00,ACCT_XFER,4500.00,
+2024-06-03,DEBIT,GROCERY STORE,-54.32,MISC_DEBIT,4445.68,

@@ -71,6 +71,7 @@ def seed_coffee(db: Session) -> None:
         last4="1111",
         default_owner_id=owner.id,
         source_format="csv",
+        account_kind="credit_card",
         default_mapping={
             "date_col": "Date",
             "description_col": "Description",

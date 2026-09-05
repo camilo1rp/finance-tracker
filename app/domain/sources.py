@@ -48,7 +48,8 @@ class CsvSource(TransactionSource):
         file_path = kwargs.get("file_path", kwargs.get("file"))
         if file_path is None:
             raise ValueError("CsvSource.fetch requires file_path")
-        frame = pd.read_csv(file_path)
+        # index_col=False: extra trailing fields (Chase bank CSVs) must not become the index
+        frame = pd.read_csv(file_path, index_col=False)
         frame = frame.astype(object).where(pd.notnull(frame), None)
         rows: list[dict[str, Any]] = []
         for record in frame.to_dict(orient="records"):

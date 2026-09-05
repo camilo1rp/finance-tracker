@@ -4,7 +4,6 @@ Orchestrates: source.fetch() -> normalize (+ classify) -> dedupe -> persist.
 Design note: this is the ONLY place that knows the pipeline's stage order.
 Routers call this service; they never call domain functions directly.
 """
-from dataclasses import replace
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -17,15 +16,15 @@ from app.domain.classification import (
     classify_category,
     classify_merchant,
     classify_owner,
-    classify_transaction_type,
 )
 from app.domain.db_lookup import DbNormalizationLookup
-from app.domain.dedupe import compute_dedupe_hash, split_new_and_duplicates
+from app.domain.dedupe import assign_dedupe_hashes, split_new_and_duplicates
 from app.domain.mapping import ImportMapping, SignConvention, resolve_mapping
 from app.domain.merchant import extract_merchant, resolved_merchant
 from app.domain.normalize import normalize_rows
 from app.domain.sources import TransactionSource
 from app.domain.transaction import CanonicalTransaction, IngestResult, ReclassifyResult, UnmappedValues
+from app.domain.transaction_type_resolver import is_effective_spend, resolve_transaction_type
 from app.models import Account, ImportBatch, Owner, Transaction
 
 
@@ -39,15 +38,19 @@ def _service_trace_inputs(inputs: dict) -> dict:
 
 def mapping_from_stored(data: dict) -> ImportMapping:
     sign = data.get("sign_convention")
+    type_col = data.get("type_col")
+    sign_enum = SignConvention(sign) if sign else None
+    if not type_col and sign_enum is None:
+        sign_enum = SignConvention.NEGATIVE_IS_SPEND
     return ImportMapping(
         date_col=data["date_col"],
         description_col=data["description_col"],
         amount_col=data["amount_col"],
         category_col=data.get("category_col"),
         owner_col=data.get("owner_col"),
-        type_col=data.get("type_col"),
+        type_col=type_col,
         merchant_col=data.get("merchant_col"),
-        sign_convention=SignConvention(sign) if sign else None,
+        sign_convention=sign_enum,
     )
 
 
@@ -57,6 +60,7 @@ def ingest_from_source(
     source: TransactionSource,
     fetch_kwargs: dict,
     filename: str,
+    allow_duplicates: bool = False,
 ) -> IngestResult:
     """
     Full pipeline for one import:
@@ -64,8 +68,9 @@ def ingest_from_source(
       2. rows = source.fetch(**fetch_kwargs)
       3. lookup = DbNormalizationLookup(db)
       4. canonical, unmapped = normalize_rows(rows, mapping, account_id,
-         default_owner, lookup)
-      5. compute dedupe_hash for each canonical row
+         default_owner, lookup, account_kind)
+      5. assign dedupe_hash for each canonical row (occurrence suffix if
+         allow_duplicates)
       6. existing_hashes = query DB for hashes already stored for this account
       7. split = split_new_and_duplicates(canonical, existing_hashes)
       8. resolve owner name -> Owner.id for each row being persisted
@@ -87,12 +92,15 @@ def ingest_from_source(
     rows = source.fetch(**fetch_kwargs)
     lookup = DbNormalizationLookup(db)
     canonical, unmapped, errors = normalize_rows(
-        rows, mapping, account_id, default_owner, lookup
+        rows,
+        mapping,
+        account_id,
+        default_owner,
+        lookup,
+        account.account_kind,
     )
 
-    hashed = [
-        replace(txn, dedupe_hash=compute_dedupe_hash(txn)) for txn in canonical
-    ]
+    hashed = assign_dedupe_hashes(canonical, allow_duplicates=allow_duplicates)
     existing_hashes = set(
         db.scalars(
             select(Transaction.dedupe_hash).where(Transaction.account_id == account_id)
@@ -122,6 +130,7 @@ def ingest_from_source(
                 description=txn.description,
                 amount=txn.amount,
                 transaction_type=txn.transaction_type.value,
+                type_override=None,
                 is_spend=txn.is_spend,
                 raw_type=txn.raw_type,
                 category_raw=txn.category_raw,
@@ -181,15 +190,18 @@ def run_reclassification(
 
     for txn in rows:
         changed = False
-
-        if txn.raw_type:
-            new_type = classify_transaction_type(txn.raw_type, lookup, txn.account_id)
-            if txn.transaction_type != new_type.value:
-                txn.transaction_type = new_type.value
-                txn.is_spend = new_type is TransactionType.SPEND
-                changed = True
-            if new_type is TransactionType.UNKNOWN:
-                unmapped_types.add(txn.raw_type)
+        account = accounts.get(txn.account_id)
+        mapping = (
+            mapping_from_stored(account.default_mapping)
+            if account is not None
+            else ImportMapping(
+                date_col="Date",
+                description_col="Description",
+                amount_col="Amount",
+                sign_convention=SignConvention.NEGATIVE_IS_SPEND,
+            )
+        )
+        account_kind = account.account_kind if account is not None else "depository"
 
         if txn.owner_raw:
             owner_name = classify_owner(txn.owner_raw, lookup, txn.account_id)
@@ -213,13 +225,37 @@ def run_reclassification(
         if merchant_raw and new_merchant is None:
             unmapped_merchants.add(merchant_raw)
 
+        merchant_for_type = resolved_merchant(
+            merchant_raw, new_merchant, txn.merchant_override
+        )
+        new_type = resolve_transaction_type(
+            txn.raw_type,
+            txn.amount,
+            mapping,
+            account_kind,
+            lookup,
+            txn.account_id,
+            merchant=merchant_for_type,
+        )
+        if txn.transaction_type != new_type.value:
+            txn.transaction_type = new_type.value
+            changed = True
+        new_is_spend = is_effective_spend(new_type.value, txn.type_override)
+        if txn.is_spend != new_is_spend:
+            txn.is_spend = new_is_spend
+            changed = True
+        if (
+            new_type is TransactionType.UNKNOWN
+            and txn.raw_type
+            and txn.type_override is None
+        ):
+            unmapped_types.add(txn.raw_type)
+
         new_category = classify_category(
             txn.category_raw,
             lookup,
             txn.account_id,
-            merchant=resolved_merchant(
-                merchant_raw, new_merchant, txn.merchant_override
-            ),
+            merchant=merchant_for_type,
         )
         if txn.category_normalized != new_category:
             txn.category_normalized = new_category
@@ -248,9 +284,10 @@ def reclassify_transactions(
 ) -> ReclassifyResult:
     """
     Re-apply current normalization mappings to stored transactions.
-    Does not re-import: raw columns stay put. category_override is left alone.
-    Type is only recalculated when raw_type is present (sign-derived rows stay).
-    Owner is only recalculated when owner_raw is present (account default stays).
+    Does not re-import: raw columns stay put. category_override and
+    type_override are left alone. Type is always recomputed via the
+    resolver (lookup if raw_type, else sign+kind when sign_convention is
+    set). is_spend follows effective type. Owner only when owner_raw present.
     """
     result = run_reclassification(db, account_id=account_id)
     db.commit()

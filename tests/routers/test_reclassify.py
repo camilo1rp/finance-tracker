@@ -16,6 +16,7 @@ def test_reclassify_applies_new_type_and_category_mappings(
         json={
             "name": "Chase",
             "last4": "9470",
+            "account_kind": "credit_card",
             "default_owner_id": owner["id"],
             "default_mapping": {
                 "date_col": "Transaction Date",
@@ -81,6 +82,7 @@ def test_reclassify_backfills_merchant_from_description(
         json={
             "name": "Chase",
             "last4": "9470",
+            "account_kind": "credit_card",
             "default_owner_id": owner["id"],
             "default_mapping": {
                 "date_col": "Transaction Date",
@@ -134,6 +136,7 @@ def test_reclassify_category_uses_resolved_merchant(
         json={
             "name": "Chase",
             "last4": "9470",
+            "account_kind": "credit_card",
             "default_owner_id": owner["id"],
             "default_mapping": {
                 "date_col": "Transaction Date",
@@ -210,6 +213,86 @@ def test_reclassify_category_uses_resolved_merchant(
     assert rows["COSTCO STORE 5"]["category_normalized"] == "Household"
     assert rows["AMAZON MARKETPLACE"]["merchant_raw"] == "AMAZON MARKETPLACE"
     assert rows["AMAZON MARKETPLACE"]["category_normalized"] == "Shopping"
+
+
+def test_reclassify_type_uses_merchant_scope(
+    client: TestClient, db_session: Session
+) -> None:
+    owner = client.post("/owners", json={"name": "Camilo Romero"}).json()
+    account = client.post(
+        "/accounts",
+        json={
+            "name": "Chase Checking",
+            "last4": "0170",
+            "account_kind": "depository",
+            "default_owner_id": owner["id"],
+            "default_mapping": {
+                "date_col": "Posting Date",
+                "description_col": "Description",
+                "amount_col": "Amount",
+                "type_col": "Type",
+            },
+        },
+    ).json()
+
+    db_session.add(
+        Transaction(
+            account_id=account["id"],
+            owner_id=owner["id"],
+            transaction_date=date(2026, 8, 20),
+            description="WESTERN UNION       CAPTURE 623287974331123 WEB ID: 9222993574",
+            amount=Decimal("-2000.00"),
+            transaction_type="SPEND",
+            is_spend=True,
+            raw_type="MISC_DEBIT",
+            merchant_raw="WESTERN UNION CAPTURE 623287974331123 WEB ID: 9222993574",
+            dedupe_hash="reclassify-wu",
+            raw={},
+        )
+    )
+    db_session.add(
+        Transaction(
+            account_id=account["id"],
+            owner_id=owner["id"],
+            transaction_date=date(2026, 8, 4),
+            description="Woodlake Op      RENT       270209230       WEB ID: 1861072180",
+            amount=Decimal("-2146.00"),
+            transaction_type="SPEND",
+            is_spend=True,
+            raw_type="MISC_DEBIT",
+            merchant_raw="Woodlake Op RENT 270209230 WEB ID: 1861072180",
+            dedupe_hash="reclassify-rent",
+            raw={},
+        )
+    )
+    db_session.commit()
+
+    created = client.post(
+        "/mappings",
+        json={
+            "kind": "transaction_type",
+            "raw_value": "MISC_DEBIT",
+            "canonical_value": "TRANSFER",
+            "account_id": account["id"],
+            "merchant": "Western Union",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    result = client.post("/transactions/reclassify", params={"account_id": account["id"]})
+    assert result.status_code == 200, result.text
+    assert result.json()["updated"] == 1
+
+    rows = {
+        row["description"]: row
+        for row in client.get("/transactions", params={"account_id": account["id"]}).json()
+    }
+    wu = rows["WESTERN UNION       CAPTURE 623287974331123 WEB ID: 9222993574"]
+    rent = rows["Woodlake Op      RENT       270209230       WEB ID: 1861072180"]
+    assert wu["transaction_type"] == "TRANSFER"
+    assert wu["is_spend"] is False
+    assert rent["transaction_type"] == "SPEND"
+    assert rent["is_spend"] is True
 
 
 def test_reclassify_unknown_account(client: TestClient) -> None:
