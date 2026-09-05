@@ -30,13 +30,18 @@ do not resubmit the create; submit an update on that mapping_id instead.
 
 Domain quirks you must respect:
 - Raw values are matched trimmed + lowercased.
-- Category precedence is account+merchant → account → global+merchant → global,
-  so a proposed global rule can be shadowed by an existing account rule
-  (check shadowed_by_existing).
+- Category and transaction_type precedence is account+merchant → account →
+  global+merchant → global, so a proposed global rule can be shadowed by an
+  existing account rule (check shadowed_by_existing). merchant is valid on
+  category and transaction_type only. Type merchant scope also matches a
+  space-bounded prefix (merchant=western union hits "western union capture…").
+  Merchant kind raw_value uses the same prefix: one "western union" alias
+  covers "western union capture 623… web id: …" — do not create one rule
+  per capture id.
 - Transaction overrides write `Transaction.category_override`; preview reports them under
   `overrides`, not under the rule-impact list.
-- Reclassify never touches category_override or merchant_override.
-- Transaction type is recalculated only for rows with raw_type.
+- Reclassify never touches category_override, merchant_override, or type_override.
+- Transaction type is always recalculated on reclassify (lookup if raw_type, else sign+account_kind when sign_convention is set). Type mapping ops still only impact rows with raw_type.
 - Owner is recalculated only for rows with owner_raw.
 """
 
