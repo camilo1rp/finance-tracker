@@ -520,3 +520,266 @@ def test_identity_merchant_map_not_required(
     assert filtered.json()["count"] == 1
     grouped = client.get("/analytics/summary", params={"group_by": "merchant"})
     assert grouped.json()[0]["group_value"] == "WHOLE FOODS"
+
+
+def test_subcategory_filter(client: TestClient, db_session: Session) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "card-pay",
+        subcategory="card_payment",
+        amount=Decimal("200.00"),
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "savings",
+        subcategory="savings",
+        amount=Decimal("50.00"),
+    )
+    _add_txn(db_session, account.id, "no-sub", amount=Decimal("10.00"))
+
+    filtered = client.get("/transactions", params={"subcategory": "card_payment"})
+    assert filtered.status_code == 200
+    assert [row["description"] for row in filtered.json()] == ["card-pay"]
+    assert filtered.json()[0]["subcategory"] == "card_payment"
+
+    all_rows = client.get("/transactions", params={"account_id": account.id})
+    assert all_rows.status_code == 200
+    assert len(all_rows.json()) == 3
+    by_desc = {row["description"]: row for row in all_rows.json()}
+    assert by_desc["no-sub"]["subcategory"] is None
+
+
+def test_group_by_subcategory(db_session: Session) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "card-pay",
+        subcategory="card_payment",
+        amount=Decimal("200.00"),
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "savings",
+        subcategory="savings",
+        amount=Decimal("50.00"),
+    )
+    _add_txn(db_session, account.id, "no-sub", amount=Decimal("10.00"))
+
+    rows = summarize(db_session, None, None, None, None, "subcategory")
+    by_name = {row["group_value"]: row for row in rows}
+    assert by_name["card_payment"]["total"] == Decimal("200.00")
+    assert by_name["card_payment"]["count"] == 1
+    assert by_name["savings"]["total"] == Decimal("50.00")
+    assert by_name["(unassigned)"]["total"] == Decimal("10.00")
+    assert by_name["(unassigned)"]["count"] == 1
+
+
+def test_by_subcategory_alias_matches_summary(
+    client: TestClient, db_session: Session
+) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "card-pay",
+        subcategory="card_payment",
+        amount=Decimal("200.00"),
+    )
+    alias = client.get("/analytics/by-subcategory")
+    summary = client.get("/analytics/summary", params={"group_by": "subcategory"})
+    assert alias.status_code == 200
+    assert summary.status_code == 200
+    assert alias.json() == summary.json()
+    assert alias.json()[0]["group_value"] == "card_payment"
+
+
+def test_category_filter_case_insensitive(client: TestClient, db_session: Session) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "coffee",
+        category_normalized="Dining",
+        amount=Decimal("12.00"),
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "shop",
+        category_normalized="Shopping",
+        amount=Decimal("5.00"),
+    )
+
+    txn_list = client.get("/transactions", params={"category": " dining "})
+    assert txn_list.status_code == 200
+    assert [row["description"] for row in txn_list.json()] == ["coffee"]
+
+    total = client.get("/analytics/total", params={"category": "DINING"})
+    assert total.status_code == 200
+    assert Decimal(str(total.json()["total"])) == Decimal("12.00")
+    assert total.json()["count"] == 1
+
+
+def test_category_and_subcategory_and_filter(client: TestClient, db_session: Session) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "match",
+        category_normalized="Dining",
+        subcategory="card_payment",
+        amount=Decimal("200.00"),
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "cat-only",
+        category_normalized="Dining",
+        subcategory="savings",
+        amount=Decimal("50.00"),
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "sub-only",
+        category_normalized="Shopping",
+        subcategory="card_payment",
+        amount=Decimal("30.00"),
+    )
+
+    filtered = client.get(
+        "/transactions",
+        params={"category": "Dining", "subcategory": "card_payment"},
+    )
+    assert filtered.status_code == 200
+    assert [row["description"] for row in filtered.json()] == ["match"]
+
+    total = client.get(
+        "/analytics/total",
+        params={"category": "dining", "subcategory": "CARD_PAYMENT"},
+    )
+    assert total.status_code == 200
+    assert Decimal(str(total.json()["total"])) == Decimal("200.00")
+    assert total.json()["count"] == 1
+
+
+def test_unknown_category_filter_422_lists_available(
+    client: TestClient, db_session: Session
+) -> None:
+    from app.domain.label_filter import unknown_label_detail
+
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "coffee",
+        category_normalized="Dining",
+    )
+
+    response = client.get("/transactions", params={"category": "Travel"})
+    assert response.status_code == 422
+    assert response.json()["detail"] == unknown_label_detail(
+        "category", "Travel", ["Dining"]
+    )
+
+    analytics = client.get("/analytics/total", params={"category": "Travel"})
+    assert analytics.status_code == 422
+    assert analytics.json()["detail"] == response.json()["detail"]
+
+
+def test_unknown_category_and_subcategory_joined_detail(
+    client: TestClient, db_session: Session
+) -> None:
+    from app.domain.label_filter import unknown_label_detail
+
+    response = client.get(
+        "/analytics/summary",
+        params={"group_by": "category", "category": "Travel", "subcategory": "missing"},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        unknown_label_detail("category", "Travel", [])
+        + "; "
+        + unknown_label_detail("subcategory", "missing", [])
+    )
+
+
+def test_summary_category_filter(client: TestClient, db_session: Session) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "dining",
+        category_normalized="Dining",
+        amount=Decimal("10.00"),
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "shop",
+        category_normalized="Shopping",
+        amount=Decimal("20.00"),
+    )
+
+    rows = client.get(
+        "/analytics/summary",
+        params={"group_by": "merchant", "category": "Dining"},
+    )
+    assert rows.status_code == 200
+    assert len(rows.json()) == 1
+    assert Decimal(str(rows.json()[0]["total"])) == Decimal("10.00")
+
+
+def test_top_merchants_category_filter(client: TestClient, db_session: Session) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "alpha",
+        merchant_normalized="Alpha",
+        category_normalized="Dining",
+        amount=Decimal("10.00"),
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "beta",
+        merchant_normalized="Beta",
+        category_normalized="Shopping",
+        amount=Decimal("20.00"),
+    )
+
+    rows = client.get("/analytics/top-merchants", params={"category": "Dining"})
+    assert rows.status_code == 200
+    assert [row["merchant"] for row in rows.json()] == ["Alpha"]
+
+
+def test_largest_totals_respect_category_filter(
+    client: TestClient, db_session: Session
+) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "big-dining",
+        category_normalized="Dining",
+        amount=Decimal("100.00"),
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "bigger-shop",
+        category_normalized="Shopping",
+        amount=Decimal("500.00"),
+    )
+
+    body = client.get("/analytics/largest", params={"category": "Dining", "limit": 5})
+    assert body.status_code == 200
+    payload = body.json()
+    assert [row["description"] for row in payload["transactions"]] == ["big-dining"]
+    assert Decimal(str(payload["totals"]["total"])) == Decimal("100.00")

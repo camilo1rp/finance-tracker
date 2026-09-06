@@ -566,6 +566,14 @@ def run(client, suffix: str, report: Report) -> None:
     if report.expect_status("GET /analytics/summary?group_by=category", summary_cat, 200):
         report.expect_eq("summary matches by-category", summary_cat.json(), by_cat.json())
 
+    by_sub = client.get("/analytics/by-subcategory")
+    summary_sub = client.get("/analytics/summary", params={"group_by": "subcategory"})
+    if report.expect_status("GET /analytics/by-subcategory", by_sub, 200):
+        report.expect_status(
+            "GET /analytics/summary?group_by=subcategory", summary_sub, 200
+        )
+        report.expect_eq("summary matches by-subcategory", summary_sub.json(), by_sub.json())
+
     by_owner = client.get("/analytics/by-owner")
     if report.expect_status("GET /analytics/by-owner", by_owner, 200):
         owners = {row["group_value"]: row for row in by_owner.json()}
@@ -600,6 +608,10 @@ def run(client, suffix: str, report: Report) -> None:
             merchant_total.json()["count"],
             1,
         )
+
+    dining_total = client.get("/analytics/total", params={"category": "Dining"})
+    if report.expect_status("GET /analytics/total?category=Dining", dining_total, 200):
+        report.expect_eq("Dining category total count", dining_total.json()["count"] > 0, True)
 
     by_merchant_group = client.get("/analytics/summary", params={"group_by": "merchant"})
     if report.expect_status("GET /analytics/summary?group_by=merchant", by_merchant_group, 200):

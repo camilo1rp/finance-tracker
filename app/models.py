@@ -121,6 +121,7 @@ class Transaction(Base):
     category_raw: Mapped[str | None] = mapped_column(String, nullable=True)
     category_normalized: Mapped[str | None] = mapped_column(String, nullable=True)
     category_override: Mapped[str | None] = mapped_column(String, nullable=True)
+    subcategory: Mapped[str | None] = mapped_column(String, nullable=True)
 
     merchant_raw: Mapped[str | None] = mapped_column(String, nullable=True)
     merchant_normalized: Mapped[str | None] = mapped_column(String, nullable=True)

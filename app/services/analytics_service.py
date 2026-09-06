@@ -14,9 +14,14 @@ from sqlalchemy.sql import ColumnElement
 
 from app.domain.classification import TransactionType
 from app.models import Account, Owner, Transaction, effective_category, effective_merchant, effective_type
+from app.services.label_filter import (
+    ResolvedLabelFilters,
+    apply_resolved_label_filters,
+    resolve_label_filters,
+)
 
 UNASSIGNED = "(unassigned)"
-GroupBy = Literal["category", "owner", "month", "account", "merchant"]
+GroupBy = Literal["category", "owner", "month", "account", "merchant", "subcategory"]
 
 _KNOWN_CASH_FLOW_TYPES = frozenset(
     {
@@ -33,14 +38,26 @@ def _resolved_date_to(date_to: date | None) -> date:
     return date_to if date_to is not None else date.today()
 
 
+def _resolve_optional_label_filters(
+    db: Session,
+    category: str | None,
+    subcategory: str | None,
+) -> ResolvedLabelFilters | None:
+    if category is None and subcategory is None:
+        return None
+    return resolve_label_filters(db, category, subcategory)
+
+
 def _apply_filters(
     stmt: Select[Any],
+    db: Session,
     date_from: date | None,
     date_to: date | None,
     account_id: int | None,
     owner_id: int | None,
     merchant: str | None = None,
     transaction_type: str | None = None,
+    label_filters: ResolvedLabelFilters | None = None,
 ) -> Select[Any]:
     stmt = stmt.where(Transaction.transaction_date <= _resolved_date_to(date_to))
     if date_from is not None:
@@ -53,6 +70,8 @@ def _apply_filters(
         stmt = stmt.where(effective_merchant == merchant)
     if transaction_type is not None:
         stmt = stmt.where(effective_type == transaction_type)
+    if label_filters is not None:
+        stmt = apply_resolved_label_filters(stmt, label_filters)
     return stmt
 
 
@@ -174,6 +193,8 @@ def _group_key(db: Session, group_by: GroupBy) -> ColumnElement:
         return _month_bucket(db)
     if group_by == "merchant":
         return func.coalesce(effective_merchant, UNASSIGNED)
+    if group_by == "subcategory":
+        return func.coalesce(Transaction.subcategory, UNASSIGNED)
     raise ValueError(f"unsupported group_by: {group_by}")
 
 
@@ -187,6 +208,7 @@ def _totals_by_type(
     *,
     group_by: GroupBy | None = None,
     description_query: str | None = None,
+    label_filters: ResolvedLabelFilters | None = None,
 ) -> list[dict[str, Any]]:
     total_col = func.coalesce(func.sum(func.abs(Transaction.amount)), 0)
     count_col = func.count(Transaction.id)
@@ -199,11 +221,13 @@ def _totals_by_type(
         ).select_from(Transaction)
         stmt = _apply_filters(
             stmt,
+            db,
             date_from,
             date_to,
             account_id,
             owner_id,
             merchant=merchant,
+            label_filters=label_filters,
         )
         if description_query is not None:
             stmt = stmt.where(Transaction.description.ilike(f"%{description_query}%"))
@@ -235,11 +259,13 @@ def _totals_by_type(
 
     stmt = _apply_filters(
         stmt,
+        db,
         date_from,
         date_to,
         account_id,
         owner_id,
         merchant=merchant,
+        label_filters=label_filters,
     )
     if description_query is not None:
         stmt = stmt.where(Transaction.description.ilike(f"%{description_query}%"))
@@ -296,7 +322,10 @@ def summarize(
     group_by: GroupBy,
     merchant: str | None = None,
     transaction_type: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
 ) -> list[dict[str, Any]]:
+    label_filters = _resolve_optional_label_filters(db, category, subcategory)
     rows = _totals_by_type(
         db,
         date_from,
@@ -305,6 +334,7 @@ def summarize(
         owner_id,
         merchant,
         group_by=group_by,
+        label_filters=label_filters,
     )
     return _summarize_grouped_rows(rows, transaction_type, group_by, db, account_id)
 
@@ -317,9 +347,18 @@ def get_total(
     owner_id: int | None,
     merchant: str | None = None,
     transaction_type: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
 ) -> dict[str, Any]:
+    label_filters = _resolve_optional_label_filters(db, category, subcategory)
     by_type = _totals_by_type(
-        db, date_from, date_to, account_id, owner_id, merchant
+        db,
+        date_from,
+        date_to,
+        account_id,
+        owner_id,
+        merchant,
+        label_filters=label_filters,
     )
     payload = _derive_totals(by_type, transaction_type)
     return _attach_sign_convention(payload, db, account_id)
@@ -334,7 +373,10 @@ def top_merchants(
     limit: int = 10,
     merchant: str | None = None,
     transaction_type: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
 ) -> list[dict[str, Any]]:
+    label_filters = _resolve_optional_label_filters(db, category, subcategory)
     rows = _totals_by_type(
         db,
         date_from,
@@ -343,6 +385,7 @@ def top_merchants(
         owner_id,
         merchant,
         group_by="merchant",
+        label_filters=label_filters,
     )
     grouped = _summarize_grouped_rows(
         rows, transaction_type, "merchant", db, account_id
@@ -363,22 +406,33 @@ def largest_transactions(
     limit: int = 10,
     merchant: str | None = None,
     transaction_type: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
 ) -> dict[str, Any]:
+    label_filters = _resolve_optional_label_filters(db, category, subcategory)
     stmt = select(Transaction)
     stmt = _apply_filters(
         stmt,
+        db,
         date_from,
         date_to,
         account_id,
         owner_id,
-        merchant,
-        transaction_type,
+        merchant=merchant,
+        transaction_type=transaction_type,
+        label_filters=label_filters,
     )
     stmt = stmt.order_by(func.abs(Transaction.amount).desc(), Transaction.id).limit(limit)
     transactions = list(db.scalars(stmt).all())
 
     by_type = _totals_by_type(
-        db, date_from, date_to, account_id, owner_id, merchant
+        db,
+        date_from,
+        date_to,
+        account_id,
+        owner_id,
+        merchant,
+        label_filters=label_filters,
     )
     totals = _derive_totals(by_type, transaction_type)
     _attach_sign_convention(totals, db, account_id)
@@ -394,15 +448,20 @@ def search_transactions(
     query: str,
     limit: int = 50,
     merchant: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
 ) -> dict[str, Any]:
+    label_filters = _resolve_optional_label_filters(db, category, subcategory)
     stmt = select(Transaction)
     stmt = _apply_filters(
         stmt,
+        db,
         date_from,
         date_to,
         account_id,
         owner_id,
         merchant=merchant,
+        label_filters=label_filters,
     )
     stmt = stmt.where(Transaction.description.ilike(f"%{query}%"))
     stmt = stmt.order_by(Transaction.transaction_date, Transaction.id).limit(limit)
@@ -416,6 +475,7 @@ def search_transactions(
         owner_id,
         merchant,
         description_query=query,
+        label_filters=label_filters,
     )
     totals = _derive_totals(by_type)
     _attach_sign_convention(totals, db, account_id)
@@ -429,6 +489,8 @@ def cash_flow(
     account_id: int | None,
     owner_id: int | None,
     merchant: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
 ) -> dict[str, Any]:
     """
     Household cash-flow buckets by effective transaction type.
@@ -438,8 +500,15 @@ def cash_flow(
     fund card payments may appear as SPEND until overridden — prefer
     account_id for a single-account view.
     """
+    label_filters = _resolve_optional_label_filters(db, category, subcategory)
     by_type = _totals_by_type(
-        db, date_from, date_to, account_id, owner_id, merchant
+        db,
+        date_from,
+        date_to,
+        account_id,
+        owner_id,
+        merchant,
+        label_filters=label_filters,
     )
     payload = _derive_totals(by_type)
     payload.update(_cash_flow_extras(by_type))

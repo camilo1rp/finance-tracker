@@ -1,10 +1,11 @@
 from datetime import date
-from typing import Literal
+from typing import Callable, Literal, TypeVar
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.database import get_session
+from app.domain.label_filter import UnknownLabelFilterError
 from app.schemas import (
     CashFlowOut,
     GroupSummary,
@@ -17,7 +18,19 @@ from app.services import analytics_service
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
-GroupBy = Literal["category", "owner", "month", "account", "merchant"]
+GroupBy = Literal["category", "owner", "month", "account", "merchant", "subcategory"]
+
+T = TypeVar("T")
+
+
+def _call_analytics(fn: Callable[..., T], db: Session, /, **kwargs) -> T:
+    try:
+        return fn(db, **kwargs)
+    except UnknownLabelFilterError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=exc.detail,
+        ) from exc
 
 
 @router.get("/summary", response_model=list[GroupSummary])
@@ -29,17 +42,22 @@ def summary(
     owner_id: int | None = None,
     merchant: str | None = None,
     transaction_type: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
     db: Session = Depends(get_session),
 ) -> list[GroupSummary]:
-    return analytics_service.summarize(
+    return _call_analytics(
+        analytics_service.summarize,
         db,
-        date_from,
-        date_to,
-        account_id,
-        owner_id,
-        group_by,
-        merchant,
-        transaction_type,
+        date_from=date_from,
+        date_to=date_to,
+        account_id=account_id,
+        owner_id=owner_id,
+        group_by=group_by,
+        merchant=merchant,
+        transaction_type=transaction_type,
+        category=category,
+        subcategory=subcategory,
     )
 
 
@@ -51,17 +69,49 @@ def by_category(
     owner_id: int | None = None,
     merchant: str | None = None,
     transaction_type: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
     db: Session = Depends(get_session),
 ) -> list[GroupSummary]:
-    return analytics_service.summarize(
+    return _call_analytics(
+        analytics_service.summarize,
         db,
-        date_from,
-        date_to,
-        account_id,
-        owner_id,
-        "category",
-        merchant,
-        transaction_type,
+        date_from=date_from,
+        date_to=date_to,
+        account_id=account_id,
+        owner_id=owner_id,
+        group_by="category",
+        merchant=merchant,
+        transaction_type=transaction_type,
+        category=category,
+        subcategory=subcategory,
+    )
+
+
+@router.get("/by-subcategory", response_model=list[GroupSummary])
+def by_subcategory(
+    date_from: date | None = None,
+    date_to: date | None = None,
+    account_id: int | None = None,
+    owner_id: int | None = None,
+    merchant: str | None = None,
+    transaction_type: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
+    db: Session = Depends(get_session),
+) -> list[GroupSummary]:
+    return _call_analytics(
+        analytics_service.summarize,
+        db,
+        date_from=date_from,
+        date_to=date_to,
+        account_id=account_id,
+        owner_id=owner_id,
+        group_by="subcategory",
+        merchant=merchant,
+        transaction_type=transaction_type,
+        category=category,
+        subcategory=subcategory,
     )
 
 
@@ -73,17 +123,22 @@ def by_owner(
     owner_id: int | None = None,
     merchant: str | None = None,
     transaction_type: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
     db: Session = Depends(get_session),
 ) -> list[GroupSummary]:
-    return analytics_service.summarize(
+    return _call_analytics(
+        analytics_service.summarize,
         db,
-        date_from,
-        date_to,
-        account_id,
-        owner_id,
-        "owner",
-        merchant,
-        transaction_type,
+        date_from=date_from,
+        date_to=date_to,
+        account_id=account_id,
+        owner_id=owner_id,
+        group_by="owner",
+        merchant=merchant,
+        transaction_type=transaction_type,
+        category=category,
+        subcategory=subcategory,
     )
 
 
@@ -95,17 +150,22 @@ def by_month(
     owner_id: int | None = None,
     merchant: str | None = None,
     transaction_type: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
     db: Session = Depends(get_session),
 ) -> list[GroupSummary]:
-    return analytics_service.summarize(
+    return _call_analytics(
+        analytics_service.summarize,
         db,
-        date_from,
-        date_to,
-        account_id,
-        owner_id,
-        "month",
-        merchant,
-        transaction_type,
+        date_from=date_from,
+        date_to=date_to,
+        account_id=account_id,
+        owner_id=owner_id,
+        group_by="month",
+        merchant=merchant,
+        transaction_type=transaction_type,
+        category=category,
+        subcategory=subcategory,
     )
 
 
@@ -117,16 +177,21 @@ def total(
     owner_id: int | None = None,
     merchant: str | None = None,
     transaction_type: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
     db: Session = Depends(get_session),
 ) -> TotalOut:
-    return analytics_service.get_total(
+    return _call_analytics(
+        analytics_service.get_total,
         db,
-        date_from,
-        date_to,
-        account_id,
-        owner_id,
-        merchant,
-        transaction_type,
+        date_from=date_from,
+        date_to=date_to,
+        account_id=account_id,
+        owner_id=owner_id,
+        merchant=merchant,
+        transaction_type=transaction_type,
+        category=category,
+        subcategory=subcategory,
     )
 
 
@@ -137,6 +202,8 @@ def cash_flow(
     account_id: int | None = None,
     owner_id: int | None = None,
     merchant: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
     db: Session = Depends(get_session),
 ) -> CashFlowOut:
     """Household cash-flow by effective type.
@@ -145,8 +212,16 @@ def cash_flow(
     and other (ADJUSTMENT, UNKNOWN). Depository outflows that fund card
     payments may appear as SPEND until overridden — prefer account_id for one account.
     """
-    return analytics_service.cash_flow(
-        db, date_from, date_to, account_id, owner_id, merchant
+    return _call_analytics(
+        analytics_service.cash_flow,
+        db,
+        date_from=date_from,
+        date_to=date_to,
+        account_id=account_id,
+        owner_id=owner_id,
+        merchant=merchant,
+        category=category,
+        subcategory=subcategory,
     )
 
 
@@ -158,18 +233,23 @@ def top_merchants(
     owner_id: int | None = None,
     merchant: str | None = None,
     transaction_type: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
     limit: int = Query(default=10, ge=1),
     db: Session = Depends(get_session),
 ) -> list[MerchantSummary]:
-    return analytics_service.top_merchants(
+    return _call_analytics(
+        analytics_service.top_merchants,
         db,
-        date_from,
-        date_to,
-        account_id,
-        owner_id,
-        limit,
-        merchant,
-        transaction_type,
+        date_from=date_from,
+        date_to=date_to,
+        account_id=account_id,
+        owner_id=owner_id,
+        limit=limit,
+        merchant=merchant,
+        transaction_type=transaction_type,
+        category=category,
+        subcategory=subcategory,
     )
 
 
@@ -181,18 +261,23 @@ def largest(
     owner_id: int | None = None,
     merchant: str | None = None,
     transaction_type: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
     limit: int = Query(default=10, ge=1),
     db: Session = Depends(get_session),
 ) -> TransactionListOut:
-    return analytics_service.largest_transactions(
+    return _call_analytics(
+        analytics_service.largest_transactions,
         db,
-        date_from,
-        date_to,
-        account_id,
-        owner_id,
-        limit,
-        merchant,
-        transaction_type,
+        date_from=date_from,
+        date_to=date_to,
+        account_id=account_id,
+        owner_id=owner_id,
+        limit=limit,
+        merchant=merchant,
+        transaction_type=transaction_type,
+        category=category,
+        subcategory=subcategory,
     )
 
 
@@ -204,11 +289,23 @@ def search(
     account_id: int | None = None,
     owner_id: int | None = None,
     merchant: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
     limit: int = Query(default=50, ge=1),
     db: Session = Depends(get_session),
 ) -> TransactionListOut:
-    return analytics_service.search_transactions(
-        db, date_from, date_to, account_id, owner_id, query, limit, merchant
+    return _call_analytics(
+        analytics_service.search_transactions,
+        db,
+        date_from=date_from,
+        date_to=date_to,
+        account_id=account_id,
+        owner_id=owner_id,
+        query=query,
+        limit=limit,
+        merchant=merchant,
+        category=category,
+        subcategory=subcategory,
     )
 
 

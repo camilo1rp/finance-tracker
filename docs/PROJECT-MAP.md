@@ -18,7 +18,7 @@ Planning reference for `finance-tracker-skeleton`. Derived from source and tests
 
 | Item | Count | How derived |
 |---|---|---|
-| HTTP app endpoints | **24** | health 1 + accounts 2 + owners 2 + mappings 6 + imports 1 + transactions 3 + analytics 9. Excludes FastAPI `/docs`, `/redoc`, `/openapi.json`. [C] router tables §4 |
+| HTTP app endpoints | **25** | health 1 + accounts 2 + owners 2 + mappings 6 + imports 1 + transactions 3 + analytics 10. Excludes FastAPI `/docs`, `/redoc`, `/openapi.json`. [C] router tables §4 |
 | Tables | **9** | listed in §3. Smoke test asserts **5** of them — see §12. [C]/[T] |
 | Agent tools | **21** | 15 read-only + 2 read-with-side-effect (`find_receipts` observation-cache write, `load_proposal` graph state) + 4 non-read (`submit_plan`, `run_data_steward`, `submit_recommendation`, `run_enricher`). **0** apply tools. Same scheme as §8.3. [C] |
 | Graphs in `langgraph.json` | **4** | `coordinator`, `steward`, `analyst`, `enricher` [C] |
@@ -279,13 +279,14 @@ Constraint (verbatim): `UniqueConstraint("dedupe_hash", name="uq_transaction_ded
 | category_raw | String | yes | stripped, not lowercased |
 | category_normalized | String | yes | lookup canonical or None |
 | category_override | String | yes | PATCH and plan-gated transaction override write target; reclassify never writes |
+| subcategory | String | yes | PATCH-only label (e.g. transfer kind); not mapped at import |
 | merchant_raw | String | yes | column or extracted; whitespace-collapsed |
 | merchant_normalized | String | yes | lookup canonical or None |
 | merchant_override | String | yes | PATCH only; reclassify never writes |
 | dedupe_hash | String | no | sha256 identity |
 | raw | JSON | no | original row dict, untouched |
 
-Existing DBs: `app/database.py::_ensure_merchant_columns` `ALTER TABLE transactions ADD COLUMN {merchant_raw,merchant_normalized,merchant_override} VARCHAR` if missing.
+Existing DBs: `app/database.py::_ensure_merchant_columns` `ALTER TABLE transactions ADD COLUMN {merchant_raw,merchant_normalized,merchant_override,subcategory} VARCHAR` if missing.
 
 ### 3.6 Computed SQL (verbatim) — `app/models.py`
 
@@ -526,7 +527,7 @@ erDiagram
 
 App: `app/main.py::create_app` (title `"Family Finance Tracker"`). All routers use `Depends(app/database.py::get_session)` — session closed after request; **commit is the callee's job** (router or service). Pydantic/query validation → **422** (FastAPI). Status `HTTP_422_UNPROCESSABLE_CONTENT` is used for domain 422s. Unmarked HTTP contract claims are **[C]**; a named test is **[T]**.
 
-Shared analytics query params (unless noted): `date_from: date | None = None`, `date_to: date | None = None`, `account_id: int | None = None`, `owner_id: int | None = None`, `merchant: str | None = None`, optional `transaction_type`. Service layer **always** upper-bounds `transaction_date` at `date.today()` when `date_to` is omitted (`app/services/analytics_service.py::_resolved_date_to` via `_apply_filters`). All endpoints return full type breakdown; use `spend` for net spending. `merchant` matches **effective_merchant**. There is **no category filter** on analytics.
+Shared analytics query params (unless noted): `date_from: date | None = None`, `date_to: date | None = None`, `account_id: int | None = None`, `owner_id: int | None = None`, `merchant: str | None = None`, optional `transaction_type`, optional `category`, optional `subcategory`. Service layer **always** upper-bounds `transaction_date` at `date.today()` when `date_to` is omitted (`app/services/analytics_service.py::_resolved_date_to` via `_apply_filters`). All endpoints return full type breakdown; use `spend` for net spending. `merchant` matches **effective_merchant**. `category` / `subcategory` filters use [`app/services/label_filter.py::resolve_label_filters`](app/services/label_filter.py) (case/whitespace insensitive; must exist on stored transactions; AND when both set). Unknown labels → **422** via [`UnknownLabelFilterError.detail`](app/domain/label_filter.py).
 
 ### 4.1 `app/main.py`
 
@@ -570,17 +571,18 @@ Shared analytics query params (unless noted): `date_from: date | None = None`, `
 | Method | Path | Params | Body | Response | Status | Delegates | Quirks |
 |---|---|---|---|---|---|---|---|
 | POST | `/transactions/reclassify` | `account_id=None` | — | `ReclassifyResultOut` | 200; 404 unknown account | `reclassify_transactions` | Does not re-import. Commits in service. |
-| GET | `/transactions` | `date_from`, `date_to`, `owner_id`, `category`, `merchant`, `account_id` all optional | — | `list[TransactionOut]` | 200 | inline select | **No** `spend_only`. **No** `date_to` default to today. `category`/`merchant` = **effective** values. No limit. |
-| PATCH | `/transactions/{transaction_id}` | path id | `TransactionPatch` | `TransactionOut` | 200; 404 txn or owner | inline | Only fields in `model_fields_set`. Never writes `category_raw` / `merchant_raw`. If `category_override` changes, deletes any `transaction_overrides` provenance row in the same transaction. Commits in router. |
+| GET | `/transactions` | `date_from`, `date_to`, `owner_id`, `category`, `merchant`, `subcategory`, `account_id` all optional | — | `list[TransactionOut]` | 200; 422 unknown category/subcategory | `resolve_label_filters` + inline select | **No** `spend_only`. **No** `date_to` default to today. `category`/`subcategory` validated via [`label_filter`](app/services/label_filter.py) (case/whitespace insensitive; AND when both set). `merchant` = **effective** value. No limit. |
+| PATCH | `/transactions/{transaction_id}` | path id | `TransactionPatch` | `TransactionOut` | 200; 404 txn or owner | inline | Only fields in `model_fields_set`. Never writes `category_raw` / `merchant_raw`. `subcategory` is PATCH-only. If `category_override` changes, deletes any `transaction_overrides` provenance row in the same transaction. Commits in router. |
 
-### 4.7 `app/routers/analytics.py` (9)
+### 4.7 `app/routers/analytics.py` (10)
 
-All except `/unmapped` go through `_apply_filters` → **`date_to` defaults to today**. Optional `transaction_type` filters list endpoints; aggregates always include all types in the breakdown.
+All except `/unmapped` go through `_apply_filters` → **`date_to` defaults to today**. Optional `transaction_type` filters list endpoints; optional `category` / `subcategory` validated then AND-filtered; aggregates always include all types in the breakdown.
 
 | Method | Path | Extra params | Response | Delegates |
 |---|---|---|---|---|
-| GET | `/analytics/summary` | required `group_by: category\|owner\|month\|account\|merchant`; 422 if invalid | `list[GroupSummary]` | `summarize` |
+| GET | `/analytics/summary` | required `group_by: category\|owner\|month\|account\|merchant\|subcategory`; 422 if invalid | `list[GroupSummary]` | `summarize` |
 | GET | `/analytics/by-category` | — | `list[GroupSummary]` | `summarize(..., "category")` |
+| GET | `/analytics/by-subcategory` | — | `list[GroupSummary]` | `summarize(..., "subcategory")` |
 | GET | `/analytics/by-owner` | — | `list[GroupSummary]` | `summarize(..., "owner")` |
 | GET | `/analytics/by-month` | — | `list[GroupSummary]` | `summarize(..., "month")` |
 | GET | `/analytics/total` | — | `TotalOut` (`by_type`, purchases, spend, `net_cash_flow`) | `get_total` |
@@ -590,7 +592,7 @@ All except `/unmapped` go through `_apply_filters` → **`date_to` defaults to t
 | GET | `/analytics/cash-flow` | — | `CashFlowOut` (`TotalsBreakdown` + income/fees/transfers/other) | `cash_flow` |
 | GET | `/analytics/unmapped` | none | `UnmappedValuesOut` | `unmapped_summary` |
 
-`by-*` are aliases of `summary` with a fixed `group_by`. Proven: `tests/routers/test_analytics.py::test_by_category_alias_matches_summary`. [T]
+`by-*` are aliases of `summary` with a fixed `group_by`. Proven: `tests/routers/test_analytics.py::test_by_category_alias_matches_summary`, `test_by_subcategory_alias_matches_summary`. [T]
 
 **Not covered here:** OpenAPI generated schemas; request examples.
 
@@ -631,9 +633,9 @@ Field lists are **[C]** (read from the Pydantic classes). Behavioral notes that 
 | `SkippedOp` | `op: MappingOp`, `reason: "duplicate" \| "missing"` | `ApplyResult.skipped` |
 | `ApplyResult` | `created_ids`, `updated_ids`, `deleted_ids`, `skipped`, `overrides_set=0`, `overrides_removed=0`, `reclass_scanned`, `reclass_updated`, `unmapped_after` | apply HTTP; steward `apply_result` |
 | `ImportResult` | `account_id`, `import_batch_id`, `total_rows_read`, `inserted`, `duplicates_skipped`, `unmapped`, `errors` | `POST /imports` |
-| `TransactionOut` | `id`, `account_id`, `transaction_date`, `description`, `amount`, `transaction_type`, `is_spend`, category triple, `owner_id`, merchant triple | list/patch/largest/search tools. **Omits** `owner_raw`, `raw_type`, `dedupe_hash`, `raw`, `import_batch_id` |
+| `TransactionOut` | `id`, `account_id`, `transaction_date`, `description`, `amount`, `transaction_type`, `is_spend`, category triple, `subcategory`, `owner_id`, merchant triple | list/patch/largest/search tools. **Omits** `owner_raw`, `raw_type`, `dedupe_hash`, `raw`, `import_batch_id` |
 | `ReclassifyResultOut` | `scanned`, `updated`, `unmapped` | `POST /transactions/reclassify` |
-| `TransactionPatch` | `category_override=None`, `owner_id=None`, `merchant_override=None` | PATCH txn |
+| `TransactionPatch` | `category_override=None`, `subcategory=None`, `owner_id=None`, `merchant_override=None`, `type_override=None` | PATCH txn |
 | `TotalsBreakdown` | `by_type`, `purchases`, `refunds`, `spend` (purchases−refunds), `net_cash_flow`, `total`, `count`, `average`, `sign_convention` | shared analytics totals |
 | `GroupSummary` | `TotalsBreakdown` + `group_value` | summarize |
 | `TypeTotalOut` | `transaction_type`, `total` (abs), `count` | `by_type` rows |
@@ -894,7 +896,7 @@ Order: load Account → `resolve_mapping(mapping_from_stored(...))` → default 
 
 All read-only; no commit.
 
-**`_apply_filters`** — `date_to` → today; optional date_from/account/owner/merchant; optional `transaction_type` filters list queries by **`effective_type`**.
+**`_apply_filters`** — `date_to` → today; optional date_from/account/owner/merchant; optional `transaction_type` filters list queries by **`effective_type`**; optional `label_filters` from [`resolve_label_filters`](app/services/label_filter.py) (`category`/`subcategory` IN match, AND when both set).
 
 **`cash_flow(...)`** — `TotalsBreakdown` plus `{income, fees, transfers, other, other_count}` from one `_totals_by_type` query. `spend` = purchases − refunds; `net_cash_flow` = income + refunds − purchases − fees (matches `get_total`). Proven: `tests/routers/test_cash_flow.py`.
 
@@ -1177,12 +1179,12 @@ Classification (same scheme as §0): **read-only** = no DB write and no graph-st
 | `list_accounts` | none | select Account → `AccountOut` | read | `app/agent/tools/read.py::list_accounts` |
 | `get_unmapped_values` | none | `app/services/analytics_service.py::unmapped_summary` | read | `app/agent/tools/read.py::get_unmapped_values` |
 | `list_mappings` | `kind=None`, `account_id=None` | select NormalizationMapping | read | `app/agent/tools/read.py::list_mappings` |
-| `list_transactions` | `account_id`, `owner_id`, `category`, `merchant`, `date_from`, `date_to`, `limit=25` | inline select (not `_apply_filters`) | read | `app/agent/tools/read.py::list_transactions` |
-| `search_transactions` | `query`, `account_id`, `owner_id`, `date_from`, `date_to`, `merchant`, `limit=25` | `app/services/analytics_service.py::search_transactions` | read | `app/agent/tools/read.py::search_transactions_tool` |
-| `summarize` | `group_by`, dates, `account_id`, `owner_id`, `merchant`, optional `transaction_type` | `app/services/analytics_service.py::summarize` | read | `app/agent/tools/read.py::summarize` |
-| `get_total` | dates, ids, `merchant`, optional `transaction_type` | `app/services/analytics_service.py::get_total` | read | `app/agent/tools/read.py::get_total` |
-| `top_merchants` | `limit=10`, dates, ids, `merchant`, optional `transaction_type` | `app/services/analytics_service.py::top_merchants` | read | `app/agent/tools/read.py::top_merchants` |
-| `largest_transactions` | `limit=10`, dates, ids, `merchant`, optional `transaction_type` | `app/services/analytics_service.py::largest_transactions` | read | `app/agent/tools/read.py::largest_transactions` |
+| `list_transactions` | `account_id`, `owner_id`, `category`, `merchant`, `subcategory`, `date_from`, `date_to`, `limit=25` | `resolve_label_filters` + inline select (not `_apply_filters`) | read | `app/agent/tools/read.py::list_transactions` |
+| `search_transactions` | `query`, `account_id`, `owner_id`, `date_from`, `date_to`, `merchant`, `category`, `subcategory`, `limit=25` | `app/services/analytics_service.py::search_transactions` | read | `app/agent/tools/read.py::search_transactions_tool` |
+| `summarize` | `group_by`, dates, `account_id`, `owner_id`, `merchant`, optional `transaction_type`, optional `category`, optional `subcategory` | `app/services/analytics_service.py::summarize` | read | `app/agent/tools/read.py::summarize` |
+| `get_total` | dates, ids, `merchant`, optional `transaction_type`, optional `category`, optional `subcategory` | `app/services/analytics_service.py::get_total` | read | `app/agent/tools/read.py::get_total` |
+| `top_merchants` | `limit=10`, dates, ids, `merchant`, optional `transaction_type`, optional `category`, optional `subcategory` | `app/services/analytics_service.py::top_merchants` | read | `app/agent/tools/read.py::top_merchants` |
+| `largest_transactions` | `limit=10`, dates, ids, `merchant`, optional `transaction_type`, optional `category`, optional `subcategory` | `app/services/analytics_service.py::largest_transactions` | read | `app/agent/tools/read.py::largest_transactions` |
 
 Lists: `READ_TOOLS` (first six), `ANALYTICS_TOOLS` (last four), `ANALYST_TOOLS` = owners, accounts, list_transactions, search, + analytics.
 
@@ -1258,8 +1260,9 @@ and once without (global rules).
 List stored transactions.
 
 Does not default date_to.
-category/merchant filters match the effective value
-(override → normalized → raw). limit must be >= 1.
+category/subcategory must exist on stored transactions (case and whitespace
+insensitive). When both are set, rows must match both. merchant filters match
+the effective value. limit must be >= 1.
 ```
 
 `search_transactions`:
@@ -1278,7 +1281,7 @@ merchant matches the effective value. limit must be >= 1.
 ```
 Group transaction totals with get_total breakdown per bucket.
 
-group_by is category, owner, month, account, or merchant.
+group_by is category, owner, month, account, merchant, or subcategory.
 Each row includes purchases, refunds, spend, net_cash_flow, by_type.
 Month buckets YYYY-MM ascending; others sort by spend desc.
 date_to defaults to today. Optional transaction_type changes headline total/count.
@@ -1338,7 +1341,8 @@ Domain quirks you must respect:
   alias covers "western union capture 623… web id: …" — do not create one rule
   per capture id.
 - Transaction overrides write `Transaction.category_override`; preview reports them under
-  `overrides`, not under the rule-impact list.
+  `overrides`, not under the rule-impact list. `total_would_change` includes override
+  `set`/`remove`. `noop`, `remove_noop`, `missing`, and `replace_conflict` do not count.
 - Reclassify never touches category_override, merchant_override, or type_override.
 - Transaction type is always recalculated on reclassify (lookup if raw_type, else sign+account_kind when sign_convention is set). Type mapping ops still only impact rows with raw_type.
 - Owner is recalculated only for rows with owner_raw.

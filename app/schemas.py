@@ -275,6 +275,7 @@ class TransactionOut(BaseModel):
     category_raw: Optional[str]
     category_normalized: Optional[str]
     category_override: Optional[str]
+    subcategory: Optional[str] = None
     owner_id: Optional[int]
     merchant_raw: Optional[str] = None
     merchant_normalized: Optional[str] = None
@@ -289,6 +290,7 @@ class ReclassifyResultOut(BaseModel):
 
 class TransactionPatch(BaseModel):
     category_override: Optional[str] = None
+    subcategory: Optional[str] = None
     owner_id: Optional[int] = None
     merchant_override: Optional[str] = None
     type_override: Optional[str] = None

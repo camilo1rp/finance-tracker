@@ -78,6 +78,8 @@ def test_override_preview_actions_and_purity(db_session: Session) -> None:
     over_actions = [item.action for item in preview.overrides if item.transaction_id == overridden.id]
     assert over_actions == ["noop", "replace_conflict", "remove"]
     assert preview.ops == []
+    assert preview.scanned == 0
+    assert preview.total_would_change == 2
     assert db_session.scalar(select(func.count()).select_from(TransactionOverride)) == before
 
 
@@ -95,3 +97,68 @@ def test_rule_only_preview_keeps_existing_shape_plus_empty_overrides(db_session:
     assert dumped["scanned"] == 1
     assert dumped["total_would_change"] == 1
     assert dumped["ops"][0]["would_change"] == 1
+
+
+def test_override_only_set_counts_total_would_change(db_session: Session) -> None:
+    account = _seed_account(db_session)
+    txn = _txn(db_session, account.id, "liberty", category_override=None)
+    preview = preview_mappings(
+        db_session,
+        MappingPlanIn(
+            ops=[SetTransactionCategoryOp(transaction_id=txn.id, category="Insurance")]
+        ),
+    )
+    assert preview.scanned == 0
+    assert preview.ops == []
+    assert preview.total_would_change == 1
+    assert preview.overrides[0].action == "set"
+
+
+def test_override_noop_and_missing_do_not_count(db_session: Session) -> None:
+    account = _seed_account(db_session)
+    txn = _txn(db_session, account.id, "already", category_override="Insurance")
+    preview = preview_mappings(
+        db_session,
+        MappingPlanIn(
+            ops=[
+                SetTransactionCategoryOp(transaction_id=txn.id, category="Insurance"),
+                SetTransactionCategoryOp(transaction_id=999, category="Missing"),
+            ]
+        ),
+    )
+    assert preview.scanned == 0
+    assert preview.total_would_change == 0
+    assert {item.action for item in preview.overrides} == {"noop", "missing"}
+
+
+def test_mixed_rule_and_override_unions_total_would_change(db_session: Session) -> None:
+    account = _seed_account(db_session)
+    _txn(db_session, account.id, "rule-row", category_normalized=None)
+    override_txn = _txn(
+        db_session,
+        account.id,
+        "override-row",
+        category_raw="Other",
+        category_normalized="Other",
+        category_override=None,
+    )
+    preview = preview_mappings(
+        db_session,
+        MappingPlanIn(
+            ops=[
+                CreateMappingOp(
+                    op="create",
+                    kind="category",
+                    raw_value="Shopping",
+                    canonical_value="Dining",
+                ),
+                SetTransactionCategoryOp(
+                    transaction_id=override_txn.id, category="Insurance"
+                ),
+            ]
+        ),
+    )
+    assert preview.scanned == 2
+    assert preview.ops[0].would_change == 1
+    assert preview.overrides[0].action == "set"
+    assert preview.total_would_change == 2

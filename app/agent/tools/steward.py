@@ -40,7 +40,8 @@ Domain quirks you must respect:
   alias covers "western union capture 623… web id: …" — do not create one rule
   per capture id.
 - Transaction overrides write `Transaction.category_override`; preview reports them under
-  `overrides`, not under the rule-impact list.
+  `overrides`, not under the rule-impact list. `total_would_change` includes override
+  `set`/`remove`. `noop`, `remove_noop`, `missing`, and `replace_conflict` do not count.
 - Reclassify never touches category_override, merchant_override, or type_override.
 - Transaction type is always recalculated on reclassify (lookup if raw_type, else sign+account_kind when sign_convention is set). Type mapping ops still only impact rows with raw_type.
 - Owner is recalculated only for rows with owner_raw.

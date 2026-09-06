@@ -225,9 +225,9 @@ Already-imported rows do not pick up new rules by themselves. After adding mappi
 - Chase rows use the default owner
 - Apple rows with `Purchased By` have the right `owner_id`
 
-`PATCH /transactions/{id}` — set `category_override` on one miscategorized row.
+`PATCH /transactions/{id}` — set `category_override` on one miscategorized row, or `subcategory` on a transfer (e.g. `card_payment`).
 
-**Pass:** `category_raw` unchanged; `GET /transactions?category=...` finds it via override.
+**Pass:** `category_raw` unchanged; `GET /transactions?category=...` finds it via override (case/whitespace insensitive). `GET /transactions?subcategory=...` matches stored labels the same way. Unknown category/subcategory returns **422** with `available:` list.
 
 ---
 
@@ -238,6 +238,7 @@ All analytics endpoints return a full type breakdown (`purchases`, `refunds`, `s
 | Call | What to look for |
 |---|---|
 | `GET /analytics/by-category` | Same breakdown as `/total` per category (`spend` = purchases − refunds); override category appears |
+| `GET /analytics/by-subcategory` | Same breakdown per stored `subcategory`; nulls show as `(unassigned)` |
 | `GET /analytics/by-owner` | Same breakdown per owner; Chase default owner + Apple people; nulls show as `(unassigned)` |
 | `GET /analytics/by-month` | `YYYY-MM` buckets, chronological; each bucket has purchases/refunds/spend |
 | `GET /analytics/summary?group_by=account` | Chase vs Apple with shared totals fields |
@@ -257,7 +258,7 @@ UPDATE accounts SET account_kind = 'depository' WHERE id = <checking_id>;
 
 Then `POST /transactions/reclassify?account_id=<id>`.
 
-Filter one call with `account_id` and one with `date_from` / `date_to` for a month you know is in the file.
+Filter one call with `account_id` and one with `date_from` / `date_to` for a month you know is in the file. Filter one analytics call with `category` and one with `subcategory`; when both are set they AND (e.g. `GET /analytics/total?category=Dining&subcategory=card_payment`).
 
 ---
 

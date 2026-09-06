@@ -98,3 +98,33 @@ def test_patch_other_field_leaves_provenance_row(client: TestClient, db_session:
     response = client.patch(f"/transactions/{txn.id}", json={"owner_id": owner.id})
     assert response.status_code == 200
     assert len(db_session.scalars(select(TransactionOverride)).all()) == 1
+
+
+def test_patch_subcategory(client: TestClient, db_session: Session) -> None:
+    owner, account = _seed(db_session)
+    txn = Transaction(
+        account_id=account.id,
+        owner_id=owner.id,
+        transaction_date=date(2024, 6, 1),
+        description="card pay",
+        amount=Decimal("200.00"),
+        transaction_type="TRANSFER",
+        is_spend=False,
+        dedupe_hash="patch-subcategory",
+        raw={},
+    )
+    db_session.add(txn)
+    db_session.commit()
+    db_session.refresh(txn)
+
+    response = client.patch(
+        f"/transactions/{txn.id}", json={"subcategory": "card_payment"}
+    )
+    assert response.status_code == 200
+    assert response.json()["subcategory"] == "card_payment"
+    listed = client.get("/transactions", params={"account_id": account.id})
+    assert listed.json()[0]["subcategory"] == "card_payment"
+
+    cleared = client.patch(f"/transactions/{txn.id}", json={"subcategory": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["subcategory"] is None

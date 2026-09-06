@@ -327,6 +327,17 @@ def _partition_ops(
     return rule_ops, override_ops
 
 
+_MUTATING_OVERRIDE_ACTIONS = frozenset({"set", "remove"})
+
+
+def _override_change_ids(overrides: list[OverridePreview]) -> set[int]:
+    return {
+        item.transaction_id
+        for item in overrides
+        if item.action in _MUTATING_OVERRIDE_ACTIONS
+    }
+
+
 def preview_override_ops(
     db: Session, ops: list[SetTransactionCategoryOp | RemoveTransactionOverrideOp]
 ) -> list[OverridePreview]:
@@ -578,10 +589,11 @@ def preview_mappings(db: Session, plan: MappingPlanIn) -> MappingPreview:
         db, MappingPlanIn(ops=rule_ops, account_id=plan.account_id)
     )
     override_preview = preview_override_ops(db, override_ops)
+    override_changed_ids = _override_change_ids(override_preview)
     if not accs:
         return MappingPreview(
             scanned=0,
-            total_would_change=0,
+            total_would_change=len(override_changed_ids),
             ops=[],
             overrides=override_preview,
             validation_errors=validation_errors,
@@ -612,7 +624,7 @@ def preview_mappings(db: Session, plan: MappingPlanIn) -> MappingPreview:
             txn, merged, current, accs, owners_by_id, owner_ids_by_name
         )
 
-    changed_ids: set[int] = set()
+    changed_ids: set[int] = set(override_changed_ids)
     impacts: list[OpImpact] = []
     for acc in accs:
         changed_ids.update(acc.changed_txn_ids)

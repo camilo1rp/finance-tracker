@@ -61,7 +61,12 @@ def _ensure_merchant_columns(engine: Engine) -> None:
     if "transactions" not in inspector.get_table_names():
         return
     existing = {column["name"] for column in inspector.get_columns("transactions")}
-    for column in ("merchant_raw", "merchant_normalized", "merchant_override"):
+    for column in (
+        "merchant_raw",
+        "merchant_normalized",
+        "merchant_override",
+        "subcategory",
+    ):
         if column in existing:
             continue
         with engine.begin() as connection:
