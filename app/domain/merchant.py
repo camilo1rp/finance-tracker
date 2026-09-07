@@ -2,6 +2,8 @@
 
 import re
 
+from app.domain.effective import resolved_value
+
 _STORE_NOISE = re.compile(
     r"""
     (?:
@@ -38,7 +40,4 @@ def resolved_merchant(
     override: str | None = None,
 ) -> str | None:
     """Effective merchant label: override > normalized > raw."""
-    for value in (override, normalized, raw):
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    return None
+    return resolved_value(override, normalized, raw)

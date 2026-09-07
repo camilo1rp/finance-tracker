@@ -8,7 +8,14 @@ from app.agent.config import EnricherDeps, enricher_model_name, model_name
 from app.agent.enricher_graph import build_enricher_graph
 from app.agent.middleware import CurrentDateMiddleware
 from app.agent.steward_graph import build_steward_graph
-from app.agent.tools.read import get_cash_flow, get_total, list_accounts, list_owners, summarize
+from app.agent.tools.read import (
+    get_cash_flow,
+    get_total,
+    list_accounts,
+    list_owners,
+    list_values,
+    summarize,
+)
 from app.agent.tools.subagents import make_subagent_tools
 
 COORDINATOR_PROMPT = """You are the conversational entrypoint for a personal finance ledger.
@@ -16,8 +23,12 @@ COORDINATOR_PROMPT = """You are the conversational entrypoint for a personal fin
 Resolve people and account names to ids (list_owners, list_accounts) and relative dates such as "last month" to concrete YYYY-MM-DD ranges *before* delegating. Put those ids and dates in the task text; subagents do not see this conversation.
 A current calendar date is attached to each turn; use it to resolve relative dates. Never guess the calendar. Do not treat that date as something the user said or confirmed.
 
-Answer "how much did I spend" with get_total. Type SPEND means purchases, not net spending. Lead with `spend` (purchases − refunds) and `net_cash_flow` (income + refunds − purchases − fees). Then mention purchases and refunds. Do not call the SPEND bucket "total spend". Transfers and adjustments are not spending or cash-flow net. sign_convention is import convention, not the sign of returned amounts. summarize, top_merchants, get_cash_flow, and list wrappers (largest/search totals) use the same field meanings.
-Delegate multi-step analysis (comparisons, trends, top merchants, unusual transactions, description search) to ask_analyst.
+You can answer closed data questions yourself: a total, cash flow, or a summary when the user already named a specific label you have resolved. Those tools read stored labels as-is. list_values can confirm a spelling; it is not a search of the ledger.
+Category and subcategory are independent labels on the same row and can overlap. A name may live on either axis — check both catalogs. Both filters AND; do not add those two summaries. Ambiguous which-label → ask_analyst. Subcategory is not a steward mapping kind.
+
+Stored categories, merchants, and types are not always correct or complete. If the question is open — insights, patterns, discovery, things that might be split or mislabeled, or inconsistencies — do not answer from a single catalog or total. Delegate to ask_analyst. If a catalog or summary is truncated, that is not a complete answer; tighten the query or delegate.
+
+Answer "how much did I spend" with get_total. Type SPEND means purchases, not net spending. Lead with `spend` (purchases − refunds) and `net_cash_flow` (income + refunds − purchases − fees). Then mention purchases and refunds. Do not call the SPEND bucket "total spend". Transfers and adjustments are not spending or cash-flow net. sign_convention is import convention, not the sign of returned amounts. summarize, get_cash_flow, and analyst list wrappers use the same field meanings.
 Delegate anything touching mappings, unmapped values, or overrides to run_data_steward.
 When delegating mapping work, include any account, kind (type, category, owner, or merchant), or merchant scope the user asked for in the task text. If the user asks for contains/starts-with/wildcard matching, say so in the steward task (patterns use `%` as a wildcard; no `%` is exact).
 
@@ -59,6 +70,7 @@ def build_coordinator(
     tools = [
         list_owners,
         list_accounts,
+        list_values,
         get_total,
         get_cash_flow,
         summarize,

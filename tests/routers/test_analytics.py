@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Account, Owner, Transaction
 from app.services.analytics_service import get_total, summarize, unmapped_summary
+from tests.api_helpers import groups, listed
 
 
 def _hash(suffix: str) -> str:
@@ -80,7 +81,7 @@ def test_summarize_category_coalesce_override_wins(db_session: Session) -> None:
         category_raw="RawOnly",
         amount=Decimal("3.00"),
     )
-    rows = summarize(db_session, None, None, None, None, "category")
+    rows = summarize(db_session, None, None, None, None, "category")["groups"]
     by_name = {row["group_value"]: row for row in rows}
     assert by_name["Override"]["total"] == Decimal("5.00")
     assert by_name["Normalized"]["total"] == Decimal("7.00")
@@ -136,7 +137,7 @@ def test_mixed_sign_spends_use_abs(db_session: Session) -> None:
         amount=Decimal("-54.32"),
         category_normalized="Dining",
     )
-    rows = summarize(db_session, None, None, None, None, "category")
+    rows = summarize(db_session, None, None, None, None, "category")["groups"]
     assert len(rows) == 1
     assert rows[0]["group_value"] == "Dining"
     assert rows[0]["purchases"] == Decimal("66.77")
@@ -179,7 +180,7 @@ def test_group_by_owner(db_session: Session) -> None:
     )
     _add_txn(db_session, account.id, "unassigned")
 
-    rows = summarize(db_session, None, None, None, None, "owner")
+    rows = summarize(db_session, None, None, None, None, "owner")["groups"]
     by_name = {row["group_value"]: row for row in rows}
     assert by_name["Alice"]["spend"] == Decimal("12.00")
     assert by_name["Bob"]["spend"] == Decimal("8.00")
@@ -190,7 +191,7 @@ def test_group_by_month_yyyy_mm(db_session: Session) -> None:
     _, account = _seed_account(db_session)
     _add_txn(db_session, account.id, "june", transaction_date=date(2024, 6, 15))
     _add_txn(db_session, account.id, "july", transaction_date=date(2024, 7, 1))
-    rows = summarize(db_session, None, None, None, None, "month")
+    rows = summarize(db_session, None, None, None, None, "month")["groups"]
     assert [row["group_value"] for row in rows] == ["2024-06", "2024-07"]
 
 
@@ -324,7 +325,7 @@ def test_summarize_refund_reduces_group_spend(db_session: Session) -> None:
         transaction_type="REFUND",
         is_spend=False,
     )
-    rows = summarize(db_session, None, None, None, None, "category")
+    rows = summarize(db_session, None, None, None, None, "category")["groups"]
     assert len(rows) == 1
     assert rows[0]["purchases"] == Decimal("20.00")
     assert rows[0]["refunds"] == Decimal("5.00")
@@ -426,7 +427,7 @@ def test_by_category_alias_matches_summary(
     summary = client.get("/analytics/summary", params={"group_by": "category"})
     assert alias.status_code == 200
     assert alias.json() == summary.json()
-    assert alias.json()[0]["group_value"] == "Dining"
+    assert groups(alias)[0]["group_value"] == "Dining"
 
 
 def test_merchant_filter_and_group_by_use_effective_value(
@@ -480,14 +481,14 @@ def test_merchant_filter_and_group_by_use_effective_value(
         params={"group_by": "category", "merchant": "Starbucks"},
     )
     assert by_cat.status_code == 200
-    assert len(by_cat.json()) == 1
-    assert by_cat.json()[0]["group_value"] == "Dining"
-    assert Decimal(str(by_cat.json()[0]["total"])) == Decimal("19.95")
-    assert by_cat.json()[0]["count"] == 3
+    assert len(groups(by_cat)) == 1
+    assert groups(by_cat)[0]["group_value"] == "Dining"
+    assert Decimal(str(groups(by_cat)[0]["total"])) == Decimal("19.95")
+    assert groups(by_cat)[0]["count"] == 3
 
     by_merchant = client.get("/analytics/summary", params={"group_by": "merchant"})
     assert by_merchant.status_code == 200
-    by_name = {row["group_value"]: row for row in by_merchant.json()}
+    by_name = {row["group_value"]: row for row in groups(by_merchant)}
     assert by_name["Starbucks"]["count"] == 3
     assert Decimal(str(by_name["Starbucks"]["total"])) == Decimal("19.95")
     assert by_name["AMAZON MARKETPLACE"]["count"] == 1
@@ -499,9 +500,8 @@ def test_merchant_filter_and_group_by_use_effective_value(
         "Starbucks",
     ]
 
-    listed = client.get("/transactions", params={"merchant": "AMAZON MARKETPLACE"})
-    assert listed.status_code == 200
-    assert [row["description"] for row in listed.json()] == ["raw-only"]
+    listed_rows = listed(client.get("/transactions", params={"merchant": "AMAZON MARKETPLACE"}))
+    assert [row["description"] for row in listed_rows] == ["raw-only"]
 
 
 def test_identity_merchant_map_not_required(
@@ -519,7 +519,7 @@ def test_identity_merchant_map_not_required(
     assert filtered.status_code == 200
     assert filtered.json()["count"] == 1
     grouped = client.get("/analytics/summary", params={"group_by": "merchant"})
-    assert grouped.json()[0]["group_value"] == "WHOLE FOODS"
+    assert groups(grouped)[0]["group_value"] == "WHOLE FOODS"
 
 
 def test_subcategory_filter(client: TestClient, db_session: Session) -> None:
@@ -540,15 +540,13 @@ def test_subcategory_filter(client: TestClient, db_session: Session) -> None:
     )
     _add_txn(db_session, account.id, "no-sub", amount=Decimal("10.00"))
 
-    filtered = client.get("/transactions", params={"subcategory": "card_payment"})
-    assert filtered.status_code == 200
-    assert [row["description"] for row in filtered.json()] == ["card-pay"]
-    assert filtered.json()[0]["subcategory"] == "card_payment"
+    filtered_rows = listed(client.get("/transactions", params={"subcategory": "card_payment"}))
+    assert [row["description"] for row in filtered_rows] == ["card-pay"]
+    assert filtered_rows[0]["subcategory"] == "card_payment"
 
-    all_rows = client.get("/transactions", params={"account_id": account.id})
-    assert all_rows.status_code == 200
-    assert len(all_rows.json()) == 3
-    by_desc = {row["description"]: row for row in all_rows.json()}
+    all_rows = listed(client.get("/transactions", params={"account_id": account.id}))
+    assert len(all_rows) == 3
+    by_desc = {row["description"]: row for row in all_rows}
     assert by_desc["no-sub"]["subcategory"] is None
 
 
@@ -570,7 +568,7 @@ def test_group_by_subcategory(db_session: Session) -> None:
     )
     _add_txn(db_session, account.id, "no-sub", amount=Decimal("10.00"))
 
-    rows = summarize(db_session, None, None, None, None, "subcategory")
+    rows = summarize(db_session, None, None, None, None, "subcategory")["groups"]
     by_name = {row["group_value"]: row for row in rows}
     assert by_name["card_payment"]["total"] == Decimal("200.00")
     assert by_name["card_payment"]["count"] == 1
@@ -595,7 +593,7 @@ def test_by_subcategory_alias_matches_summary(
     assert alias.status_code == 200
     assert summary.status_code == 200
     assert alias.json() == summary.json()
-    assert alias.json()[0]["group_value"] == "card_payment"
+    assert groups(alias)[0]["group_value"] == "card_payment"
 
 
 def test_category_filter_case_insensitive(client: TestClient, db_session: Session) -> None:
@@ -615,9 +613,8 @@ def test_category_filter_case_insensitive(client: TestClient, db_session: Sessio
         amount=Decimal("5.00"),
     )
 
-    txn_list = client.get("/transactions", params={"category": " dining "})
-    assert txn_list.status_code == 200
-    assert [row["description"] for row in txn_list.json()] == ["coffee"]
+    txn_list = listed(client.get("/transactions", params={"category": " dining "}))
+    assert [row["description"] for row in txn_list] == ["coffee"]
 
     total = client.get("/analytics/total", params={"category": "DINING"})
     assert total.status_code == 200
@@ -652,12 +649,13 @@ def test_category_and_subcategory_and_filter(client: TestClient, db_session: Ses
         amount=Decimal("30.00"),
     )
 
-    filtered = client.get(
-        "/transactions",
-        params={"category": "Dining", "subcategory": "card_payment"},
+    filtered = listed(
+        client.get(
+            "/transactions",
+            params={"category": "Dining", "subcategory": "card_payment"},
+        )
     )
-    assert filtered.status_code == 200
-    assert [row["description"] for row in filtered.json()] == ["match"]
+    assert [row["description"] for row in filtered] == ["match"]
 
     total = client.get(
         "/analytics/total",
@@ -731,8 +729,8 @@ def test_summary_category_filter(client: TestClient, db_session: Session) -> Non
         params={"group_by": "merchant", "category": "Dining"},
     )
     assert rows.status_code == 200
-    assert len(rows.json()) == 1
-    assert Decimal(str(rows.json()[0]["total"])) == Decimal("10.00")
+    assert len(groups(rows)) == 1
+    assert Decimal(str(groups(rows)[0]["total"])) == Decimal("10.00")
 
 
 def test_top_merchants_category_filter(client: TestClient, db_session: Session) -> None:
@@ -783,3 +781,201 @@ def test_largest_totals_respect_category_filter(
     payload = body.json()
     assert [row["description"] for row in payload["transactions"]] == ["big-dining"]
     assert Decimal(str(payload["totals"]["total"])) == Decimal("100.00")
+    assert payload["match_count"] == 1
+    assert payload["returned"] == 1
+    assert payload["truncated"] is False
+    assert "effective_category" in payload["transactions"][0]
+    assert "category_raw" not in payload["transactions"][0]
+
+
+def test_list_values_catalog(client: TestClient, db_session: Session) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "a",
+        category_normalized="Dining",
+        merchant_normalized="Starbucks",
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "b",
+        category_normalized="Dining",
+        merchant_normalized="Starbucks",
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "c",
+        category_normalized="Shopping",
+        merchant_normalized="Amazon",
+    )
+
+    cats = client.get("/analytics/values", params={"dimension": "category"})
+    assert cats.status_code == 200
+    body = cats.json()
+    assert [row["value"] for row in body["values"]] == ["Dining", "Shopping"]
+    assert body["values"][0]["count"] == 2
+    assert body["truncated"] is False
+
+    merchants = client.get(
+        "/analytics/values",
+        params={"dimension": "merchant", "query": "star"},
+    )
+    assert [row["value"] for row in merchants.json()["values"]] == ["Starbucks"]
+
+
+def test_summarize_limit_truncates(client: TestClient, db_session: Session) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session, account.id, "dine", category_normalized="Dining", amount=Decimal("30")
+    )
+    _add_txn(
+        db_session, account.id, "shop", category_normalized="Shopping", amount=Decimal("20")
+    )
+    _add_txn(
+        db_session, account.id, "gas", category_normalized="Gas", amount=Decimal("10")
+    )
+
+    body = client.get(
+        "/analytics/summary",
+        params={"group_by": "category", "limit": 2},
+    )
+    assert body.status_code == 200
+    payload = body.json()
+    assert [row["group_value"] for row in payload["groups"]] == ["Dining", "Shopping"]
+    assert payload["match_count"] == 3
+    assert payload["returned"] == 2
+    assert payload["truncated"] is True
+
+
+def test_search_matches_effective_merchant(
+    client: TestClient, db_session: Session
+) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "no-desc-hit",
+        description="POS PURCHASE 9912",
+        merchant_normalized="Starbucks",
+    )
+    response = client.get("/analytics/search", params={"query": "starbucks"})
+    assert response.status_code == 200
+    body = response.json()
+    assert [row["description"] for row in body["transactions"]] == ["POS PURCHASE 9912"]
+    assert body["match_count"] == 1
+
+
+def test_search_matches_category_raw_and_prime_suffix(
+    client: TestClient, db_session: Session
+) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "prime",
+        description="AMZN MKTP",
+        merchant_raw="AMAZON PRIME*9Y9ET5MT3",
+        category_raw="Shopping",
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "other",
+        description="GROCERY",
+        category_raw="Groceries",
+    )
+    by_prime = client.get("/analytics/search", params={"query": "prime"})
+    assert [row["description"] for row in by_prime.json()["transactions"]] == ["AMZN MKTP"]
+    by_shop = client.get("/analytics/search", params={"query": "shopping"})
+    assert [row["description"] for row in by_shop.json()["transactions"]] == ["AMZN MKTP"]
+    by_merchant = client.get(
+        "/analytics/search", params={"query": "amzn", "merchant": "prime"}
+    )
+    assert [row["description"] for row in by_merchant.json()["transactions"]] == ["AMZN MKTP"]
+
+
+def test_search_unknown_category_is_contains_not_422(
+    client: TestClient, db_session: Session
+) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(db_session, account.id, "coffee", category_normalized="Dining")
+    response = client.get(
+        "/analytics/search", params={"query": "coffee", "category": "Travel"}
+    )
+    assert response.status_code == 200
+    assert response.json()["transactions"] == []
+    assert response.json()["match_count"] == 0
+
+
+def test_merchant_wildcard_filter(client: TestClient, db_session: Session) -> None:
+    _, account = _seed_account(db_session)
+    _add_txn(
+        db_session,
+        account.id,
+        "store",
+        merchant_raw="STARBUCKS STORE 123",
+        amount=Decimal("5.00"),
+    )
+    _add_txn(
+        db_session,
+        account.id,
+        "other",
+        merchant_raw="AMAZON MARKETPLACE",
+        amount=Decimal("9.00"),
+    )
+    total = client.get("/analytics/total", params={"merchant": "STARBUCKS%"})
+    assert total.status_code == 200
+    assert total.json()["count"] == 1
+    rows = listed(client.get("/transactions", params={"merchant": "STARBUCKS%"}))
+    assert [row["description"] for row in rows] == ["store"]
+
+
+def test_list_transactions_page_and_get_detail(
+    client: TestClient, db_session: Session
+) -> None:
+    _, account = _seed_account(db_session)
+    txn = _add_txn(
+        db_session,
+        account.id,
+        "coffee",
+        category_raw="Food",
+        category_normalized="Dining",
+        raw_type="Sale",
+        owner_raw="Pat",
+    )
+    page = client.get("/transactions", params={"account_id": account.id})
+    assert page.status_code == 200
+    body = page.json()
+    assert body["match_count"] == 1
+    assert body["returned"] == 1
+    assert body["truncated"] is False
+    card = body["transactions"][0]
+    assert card["effective_category"] == "Dining"
+    assert "category_raw" not in card
+
+    detail = client.get(f"/transactions/{txn.id}")
+    assert detail.status_code == 200
+    row = detail.json()
+    assert row["category_raw"] == "Food"
+    assert row["category_normalized"] == "Dining"
+    assert row["effective_category"] == "Dining"
+    assert row["raw_type"] == "Sale"
+    assert row["owner_raw"] == "Pat"
+
+    missing = client.get("/transactions/999999")
+    assert missing.status_code == 404
+
+
+def test_list_transactions_truncated(client: TestClient, db_session: Session) -> None:
+    _, account = _seed_account(db_session)
+    for i in range(3):
+        _add_txn(db_session, account.id, f"row-{i}")
+    page = client.get("/transactions", params={"account_id": account.id, "limit": 2})
+    body = page.json()
+    assert body["match_count"] == 3
+    assert body["returned"] == 2
+    assert body["truncated"] is True
+

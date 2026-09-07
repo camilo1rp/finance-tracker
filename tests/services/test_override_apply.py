@@ -144,7 +144,7 @@ def test_override_survives_reclassify_and_analytics_use_effective_category(db_se
     )
     db_session.expire_all()
     assert db_session.get(Transaction, txn.id).category_override == "Dining"
-    rows = summarize(db_session, None, None, None, None, "category")
+    rows = summarize(db_session, None, None, None, None, "category")["groups"]
     assert len(rows) == 1
     assert rows[0]["group_value"] == "Dining"
     assert rows[0]["total"] == Decimal("10.00")
@@ -202,7 +202,7 @@ def test_override_survives_subsequent_merchant_rule_change(db_session: Session) 
     stored = db_session.get(Transaction, txn.id)
     assert stored.category_override == "Dining"
     assert stored.category_normalized == "Household"
-    rows = summarize(db_session, None, None, None, None, "category")
+    rows = summarize(db_session, None, None, None, None, "category")["groups"]
     assert len(rows) == 1
     assert rows[0]["group_value"] == "Dining"
     assert rows[0]["total"] == Decimal("10.00")

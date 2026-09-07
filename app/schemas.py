@@ -261,6 +261,21 @@ class ImportResult(BaseModel):
 
 # ---- Transactions ----
 
+class TransactionCard(BaseModel):
+    """Compact list row: ids + effective labels. Use TransactionOut for triples."""
+
+    id: int
+    account_id: int
+    transaction_date: date
+    description: str
+    amount: Decimal
+    effective_type: str
+    effective_category: Optional[str] = None
+    effective_merchant: Optional[str] = None
+    subcategory: Optional[str] = None
+    owner_id: Optional[int] = None
+
+
 class TransactionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -272,14 +287,19 @@ class TransactionOut(BaseModel):
     transaction_type: str
     type_override: Optional[str] = None
     is_spend: bool
+    raw_type: Optional[str] = None
     category_raw: Optional[str]
     category_normalized: Optional[str]
     category_override: Optional[str]
     subcategory: Optional[str] = None
     owner_id: Optional[int]
+    owner_raw: Optional[str] = None
     merchant_raw: Optional[str] = None
     merchant_normalized: Optional[str] = None
     merchant_override: Optional[str] = None
+    effective_type: Optional[str] = None
+    effective_category: Optional[str] = None
+    effective_merchant: Optional[str] = None
 
 
 class ReclassifyResultOut(BaseModel):
@@ -322,6 +342,13 @@ class GroupSummary(TotalsBreakdown):
     group_value: str
 
 
+class GroupSummaryPage(BaseModel):
+    groups: list[GroupSummary]
+    match_count: int
+    returned: int
+    truncated: bool
+
+
 class MerchantSummary(TotalsBreakdown):
     merchant: str
 
@@ -334,6 +361,28 @@ class CashFlowOut(TotalsBreakdown):
     other_count: int
 
 
+class TransactionPage(BaseModel):
+    transactions: list[TransactionCard]
+    match_count: int
+    returned: int
+    truncated: bool
+
+
 class TransactionListOut(BaseModel):
     totals: TotalOut
-    transactions: list[TransactionOut]
+    transactions: list[TransactionCard]
+    match_count: int
+    returned: int
+    truncated: bool
+
+
+class ValueCount(BaseModel):
+    value: str
+    count: int
+
+
+class ValueListOut(BaseModel):
+    values: list[ValueCount]
+    match_count: int
+    returned: int
+    truncated: bool

@@ -10,27 +10,26 @@ from sqlalchemy import select
 
 from app.agent.config import tool_session
 from app.domain.label_filter import UnknownLabelFilterError
-from app.models import Account, NormalizationMapping, Owner, Transaction, effective_merchant
+from app.models import Account, Owner
 from app.schemas import (
     AccountOut,
     CashFlowOut,
-    GroupSummary,
+    GroupSummaryPage,
     MerchantSummary,
     NormalizationMappingOut,
     OwnerOut,
     TotalOut,
     TransactionListOut,
     TransactionOut,
+    TransactionPage,
+    ValueListOut,
 )
 from app.services import analytics_service
 from app.services.analytics_service import unmapped_summary
-from app.services.label_filter import (
-    ResolvedLabelFilters,
-    apply_resolved_label_filters,
-    resolve_label_filters,
-)
+from app.services.mapping_query import list_normalization_mappings
 
 GroupBy = Literal["category", "owner", "month", "account", "merchant", "subcategory"]
+ValueDimension = Literal["category", "subcategory", "merchant"]
 
 
 def _parse_date(value: str | None) -> date | None:
@@ -49,21 +48,14 @@ def _limit_error(limit: int) -> str | None:
     return None
 
 
+def _optional_limit_error(limit: int | None) -> str | None:
+    if limit is None:
+        return None
+    return _limit_error(limit)
+
+
 def _label_filter_error(exc: UnknownLabelFilterError) -> str:
     return json.dumps({"error": exc.detail})
-
-
-def _resolve_label_filters_or_error(
-    db,
-    category: str | None,
-    subcategory: str | None,
-) -> ResolvedLabelFilters | str | None:
-    if category is None and subcategory is None:
-        return None
-    try:
-        return resolve_label_filters(db, category, subcategory)
-    except UnknownLabelFilterError as exc:
-        return _label_filter_error(exc)
 
 
 @tool
@@ -76,10 +68,42 @@ def list_owners() -> str:
 
 @tool
 def list_accounts() -> str:
-    """List accounts (id, name, last4)."""
+    """List accounts (id, name, last4, account_kind, default_owner_id, source_format)."""
     with tool_session() as db:
         rows = db.scalars(select(Account).order_by(Account.id)).all()
         return _dump([AccountOut.model_validate(row) for row in rows])
+
+
+@tool
+def list_values(
+    dimension: ValueDimension,
+    query: str | None = None,
+    limit: int = 25,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    account_id: int | None = None,
+    owner_id: int | None = None,
+) -> str:
+    """Catalog of distinct effective labels with counts.
+
+    dimension is category, subcategory, or merchant. query is a case-insensitive
+    substring. Does not default date_to. Use this before get_total/summarize when
+    the stored spelling is unknown. limit must be >= 1.
+    """
+    if err := _limit_error(limit):
+        return err
+    with tool_session() as db:
+        payload = analytics_service.list_values(
+            db,
+            dimension,
+            query=query,
+            limit=limit,
+            date_from=_parse_date(date_from),
+            date_to=_parse_date(date_to),
+            account_id=account_id,
+            owner_id=owner_id,
+        )
+        return ValueListOut.model_validate(payload).model_dump_json()
 
 
 @tool
@@ -90,20 +114,21 @@ def get_unmapped_values() -> str:
 
 
 @tool
-def list_mappings(kind: str | None = None, account_id: int | None = None) -> str:
+def list_mappings(
+    kind: str | None = None,
+    account_id: int | None = None,
+    include_global: bool = True,
+) -> str:
     """List normalization mapping rules.
 
-    Filtering by account_id excludes global rules (account_id IS NULL).
-    To see the full effective ruleset, call this twice: once with the account_id
-    and once without (global rules).
+    When account_id is set, include_global=true (default) returns that account's
+    rules plus global rules (account_id IS NULL). Set include_global=false for
+    account-scoped rules only.
     """
     with tool_session() as db:
-        stmt = select(NormalizationMapping)
-        if kind is not None:
-            stmt = stmt.where(NormalizationMapping.kind == kind)
-        if account_id is not None:
-            stmt = stmt.where(NormalizationMapping.account_id == account_id)
-        rows = db.scalars(stmt.order_by(NormalizationMapping.id)).all()
+        rows = list_normalization_mappings(
+            db, kind=kind, account_id=account_id, include_global=include_global
+        )
         return _dump([NormalizationMappingOut.model_validate(row) for row in rows])
 
 
@@ -118,37 +143,41 @@ def list_transactions(
     date_to: str | None = None,
     limit: int = 25,
 ) -> str:
-    """List stored transactions.
+    """List compact transaction cards (effective labels, no raw/override triples).
 
-    Does not default date_to.
-    category/subcategory must exist on stored transactions (case and whitespace
-    insensitive). When both are set, rows must match both. merchant filters
-    against the effective value. limit must be >= 1.
+    Does not default date_to. merchant is exact unless it contains `%`.
+    category/subcategory must exist on stored transactions. Returns
+    {transactions, match_count, returned, truncated}. Use get_transaction for
+    triples / raw_type / owner_raw. limit must be >= 1.
     """
     if err := _limit_error(limit):
         return err
     with tool_session() as db:
-        label_filters = _resolve_label_filters_or_error(db, category, subcategory)
-        if isinstance(label_filters, str):
-            return label_filters
-        stmt = select(Transaction)
-        parsed_from = _parse_date(date_from)
-        parsed_to = _parse_date(date_to)
-        if parsed_from is not None:
-            stmt = stmt.where(Transaction.transaction_date >= parsed_from)
-        if parsed_to is not None:
-            stmt = stmt.where(Transaction.transaction_date <= parsed_to)
-        if owner_id is not None:
-            stmt = stmt.where(Transaction.owner_id == owner_id)
-        if account_id is not None:
-            stmt = stmt.where(Transaction.account_id == account_id)
-        if merchant is not None:
-            stmt = stmt.where(effective_merchant == merchant)
-        if label_filters is not None:
-            stmt = apply_resolved_label_filters(stmt, label_filters)
-        stmt = stmt.order_by(Transaction.transaction_date, Transaction.id).limit(limit)
-        rows = db.scalars(stmt).all()
-        return _dump([TransactionOut.model_validate(row) for row in rows])
+        try:
+            payload = analytics_service.list_transactions(
+                db,
+                date_from=_parse_date(date_from),
+                date_to=_parse_date(date_to),
+                account_id=account_id,
+                owner_id=owner_id,
+                merchant=merchant,
+                category=category,
+                subcategory=subcategory,
+                limit=limit,
+            )
+        except UnknownLabelFilterError as exc:
+            return _label_filter_error(exc)
+        return TransactionPage.model_validate(payload).model_dump_json()
+
+
+@tool
+def get_transaction(transaction_id: int) -> str:
+    """Full transaction detail: triples, raw_type, owner_raw, and effective labels."""
+    with tool_session() as db:
+        row = analytics_service.get_transaction(db, transaction_id)
+        if row is None:
+            return json.dumps({"error": f"transaction {transaction_id} not found"})
+        return TransactionOut.model_validate(row).model_dump_json()
 
 
 @tool("search_transactions")
@@ -161,15 +190,16 @@ def search_transactions_tool(
     merchant: str | None = None,
     category: str | None = None,
     subcategory: str | None = None,
-    limit: int = 25,
+    limit: int = 200,
 ) -> str:
-    """Search transaction descriptions (case-insensitive substring).
+    """Search payee and label fields (case-insensitive substring).
 
-    Returns {totals, transactions}. totals uses the same field meanings as
-    get_total over all rows matching the query (not just limit). The transaction
-    list is capped at limit. date_to defaults to today when omitted.
-    merchant matches the effective value. category/subcategory use the same
-    validation as list_transactions. limit must be >= 1.
+    query matches description, merchant (raw/normalized/override/effective),
+    category triple, subcategory, raw_type, and owner_raw. Optional merchant /
+    category / subcategory filters are also contains-matches (not exact labels).
+    Returns {totals, transactions, match_count, returned, truncated}. totals
+    cover all matches, not just limit. date_to defaults to today. Default
+    limit is 200; limit >= 1.
     """
     if err := _limit_error(limit):
         return err
@@ -189,12 +219,7 @@ def search_transactions_tool(
             )
         except UnknownLabelFilterError as exc:
             return _label_filter_error(exc)
-        return TransactionListOut.model_validate(
-            {
-                "totals": payload["totals"],
-                "transactions": payload["transactions"],
-            }
-        ).model_dump_json()
+        return TransactionListOut.model_validate(payload).model_dump_json()
 
 
 @tool
@@ -208,22 +233,21 @@ def summarize(
     transaction_type: str | None = None,
     category: str | None = None,
     subcategory: str | None = None,
+    limit: int | None = None,
 ) -> str:
     """Group transaction totals with the same breakdown as get_total per bucket.
 
-    group_by is category, owner, month, account, merchant, or subcategory.
-    Each row includes by_type, purchases, refunds, spend (purchases − refunds),
-    net_cash_flow, total, count, average. Month buckets are YYYY-MM, ascending;
-    other groupings sort by spend desc.
-    "(unassigned)" is the bucket for missing groups.
-    date_to defaults to today. When transaction_type is set, total/count/average
-    in each row match that type instead of net spend.
-    merchant matches the effective value. category/subcategory use the same
-    validation as list_transactions.
+    Returns {groups, match_count, returned, truncated}. group_by is category,
+    owner, month, account, merchant, or subcategory. Month buckets are YYYY-MM,
+    ascending; other groupings sort by spend desc. limit caps groups after sort
+    (top N by spend, or first N months). date_to defaults to today. merchant
+    is exact unless it contains `%`.
     """
+    if err := _optional_limit_error(limit):
+        return err
     with tool_session() as db:
         try:
-            rows = analytics_service.summarize(
+            payload = analytics_service.summarize(
                 db,
                 _parse_date(date_from),
                 _parse_date(date_to),
@@ -234,10 +258,11 @@ def summarize(
                 transaction_type,
                 category=category,
                 subcategory=subcategory,
+                limit=limit,
             )
         except UnknownLabelFilterError as exc:
             return _label_filter_error(exc)
-        return _dump([GroupSummary.model_validate(row) for row in rows])
+        return GroupSummaryPage.model_validate(payload).model_dump_json()
 
 
 @tool
@@ -260,9 +285,8 @@ def get_total(
     `by_type` lists every effective type (abs amounts). If transaction_type
     is set, `total`/`count`/`average` match that type instead.
     sign_convention (when account_id is set) is CSV import convention.
-    date_to defaults to today. Amounts are positive magnitudes except
-    net_cash_flow, which can be negative. category/subcategory use the same
-    validation as list_transactions.
+    date_to defaults to today. merchant is exact unless it contains `%`.
+    Amounts are positive magnitudes except net_cash_flow, which can be negative.
     """
     with tool_session() as db:
         try:
@@ -297,10 +321,8 @@ def top_merchants(
     """Top merchants by net spend (purchases − refunds) with get_total breakdown.
 
     Each row includes the same fields as get_total plus merchant.
-    date_to defaults to today, limit=10. When transaction_type is set,
-    total/count/average match that type. merchant filter matches the effective value.
-    category/subcategory use the same validation as list_transactions.
-    limit must be >= 1.
+    date_to defaults to today, limit=10. merchant filter is exact unless it
+    contains `%`. limit must be >= 1.
     """
     if err := _limit_error(limit):
         return err
@@ -337,11 +359,10 @@ def largest_transactions(
 ) -> str:
     """Largest transactions by absolute amount with filter-scoped totals.
 
-    Returns {totals, transactions}. totals uses get_total field meanings over
-    the same date/account/owner/merchant window (all types, not just the list).
-    The transactions list includes all types unless transaction_type is set.
-    category/subcategory use the same validation as list_transactions.
-    limit must be >= 1.
+    Returns {totals, transactions, match_count, returned, truncated}.
+    totals use get_total field meanings over the same window. The list
+    includes all types unless transaction_type is set. Cards are compact;
+    use get_transaction for triples. limit must be >= 1.
     """
     if err := _limit_error(limit):
         return err
@@ -361,12 +382,7 @@ def largest_transactions(
             )
         except UnknownLabelFilterError as exc:
             return _label_filter_error(exc)
-        return TransactionListOut.model_validate(
-            {
-                "totals": payload["totals"],
-                "transactions": payload["transactions"],
-            }
-        ).model_dump_json()
+        return TransactionListOut.model_validate(payload).model_dump_json()
 
 
 @tool
@@ -386,7 +402,7 @@ def get_cash_flow(
     other, and other_count. net_cash_flow excludes transfers and other.
     Depository outflows that fund card payments may appear as SPEND until
     overridden — prefer account_id for a single-account view.
-    category/subcategory use the same validation as list_transactions.
+    merchant is exact unless it contains `%`.
     """
     with tool_session() as db:
         try:
@@ -405,12 +421,18 @@ def get_cash_flow(
         return CashFlowOut.model_validate(row).model_dump_json()
 
 
-READ_TOOLS = [
+CATALOG_TOOLS = [
     list_owners,
     list_accounts,
+    list_values,
+]
+
+READ_TOOLS = [
+    *CATALOG_TOOLS,
     get_unmapped_values,
     list_mappings,
     list_transactions,
+    get_transaction,
     search_transactions_tool,
 ]
 
@@ -423,9 +445,9 @@ ANALYTICS_TOOLS = [
 ]
 
 ANALYST_TOOLS = [
-    list_owners,
-    list_accounts,
+    *CATALOG_TOOLS,
     list_transactions,
+    get_transaction,
     search_transactions_tool,
     *ANALYTICS_TOOLS,
 ]

@@ -105,6 +105,24 @@ def _json(response) -> Any:
         return response.text
 
 
+def _txn_rows(response) -> list[dict]:
+    body = _json(response)
+    if isinstance(body, dict):
+        return list(body.get("transactions") or [])
+    return []
+
+
+def _summary_groups(response) -> list[dict]:
+    body = _json(response)
+    if isinstance(body, dict):
+        return list(body.get("groups") or [])
+    return []
+
+
+def _txn_detail(client, transaction_id: int) -> dict:
+    return _json(client.get(f"/transactions/{transaction_id}"))
+
+
 def _import_file(client, account_id: int, filename: str, *, allow_duplicates: bool = False):
     path = FIXTURES / filename
     params: dict = {"account_id": account_id}
@@ -406,42 +424,48 @@ def run(client, suffix: str, report: Report) -> None:
     report.expect_status("POST /imports unknown account", unknown_import, 404)
 
     # --- transactions ---
-    all_tx = client.get("/transactions")
+    all_tx = client.get("/transactions", params={"limit": 100})
     report.expect_status("GET /transactions", all_tx, 200)
-    rows = all_tx.json() if all_tx.status_code == 200 else []
+    rows = _txn_rows(all_tx) if all_tx.status_code == 200 else []
 
     if chase_id is not None:
-        chase_rows = client.get("/transactions", params={"account_id": chase_id})
+        chase_rows = client.get(
+            "/transactions", params={"account_id": chase_id, "limit": 100}
+        )
         if report.expect_status("GET /transactions?account_id=chase", chase_rows, 200):
-            report.expect_eq("chase account row count", len(chase_rows.json()), 8)
+            report.expect_eq("chase account row count", len(_txn_rows(chase_rows)), 8)
 
     if camilo_id is not None:
-        by_owner = client.get("/transactions", params={"owner_id": camilo_id})
+        by_owner = client.get(
+            "/transactions", params={"owner_id": camilo_id, "limit": 100}
+        )
         if report.expect_status("GET /transactions?owner_id=Camilo", by_owner, 200):
             report.expect_eq(
                 "all Camilo rows belong to Camilo",
-                {row["owner_id"] for row in by_owner.json()},
+                {row["owner_id"] for row in _txn_rows(by_owner)},
                 {camilo_id},
             )
 
     by_date = client.get(
         "/transactions",
-        params={"date_from": "2024-06-10", "date_to": "2024-06-12"},
+        params={"date_from": "2024-06-10", "date_to": "2024-06-12", "limit": 100},
     )
     if report.expect_status("GET /transactions date range", by_date, 200):
-        report.expect_eq("date range row count", len(by_date.json()), 3)
+        date_rows = _txn_rows(by_date)
+        report.expect_eq("date range row count", len(date_rows), 3)
         report.expect_eq(
             "date range descriptions",
-            sorted(row["description"] for row in by_date.json()),
+            sorted(row["description"] for row in date_rows),
             ["APPLE.COM", "UBER TRIP", "WHOLE FOODS"],
         )
 
-    dining = client.get("/transactions", params={"category": "Dining"})
+    dining = client.get("/transactions", params={"category": "Dining", "limit": 100})
     if report.expect_status("GET /transactions?category=Dining", dining, 200):
-        report.expect_eq("Dining count before override", len(dining.json()), 1)
+        dining_rows = _txn_rows(dining)
+        report.expect_eq("Dining count before override", len(dining_rows), 1)
         report.expect_eq(
             "Dining is Starbucks",
-            dining.json()[0]["description"] if dining.json() else None,
+            dining_rows[0]["description"] if dining_rows else None,
             "STARBUCKS STORE 123",
         )
 
@@ -449,9 +473,10 @@ def run(client, suffix: str, report: Report) -> None:
     if apple_com is None:
         report.record("Apple override category", "Subscriptions", "APPLE.COM missing", False)
     else:
+        apple_detail = _txn_detail(client, apple_com["id"])
         report.expect_eq(
             "Apple account override Other→Subscriptions",
-            apple_com["category_normalized"],
+            apple_detail["category_normalized"],
             "Subscriptions",
         )
         report.expect_eq("APPLE.COM owner is Camilo", apple_com["owner_id"], camilo_id)
@@ -468,11 +493,14 @@ def run(client, suffix: str, report: Report) -> None:
     if grocery is None or paycheck is None or reversal is None:
         report.record("sign_only rows present", "3 rows", "missing", False)
     else:
-        report.expect_eq("GROCERY is_spend", grocery["is_spend"], True)
-        report.expect_eq("GROCERY type SPEND", grocery["transaction_type"], "SPEND")
-        report.expect_eq("PAYCHECK is_spend", paycheck["is_spend"], False)
-        report.expect_eq("PAYCHECK type INCOME", paycheck["transaction_type"], "INCOME")
-        report.expect_eq("ATM REVERSAL is_spend", reversal["is_spend"], True)
+        grocery_d = _txn_detail(client, grocery["id"])
+        paycheck_d = _txn_detail(client, paycheck["id"])
+        reversal_d = _txn_detail(client, reversal["id"])
+        report.expect_eq("GROCERY is_spend", grocery_d["is_spend"], True)
+        report.expect_eq("GROCERY type SPEND", grocery_d["transaction_type"], "SPEND")
+        report.expect_eq("PAYCHECK is_spend", paycheck_d["is_spend"], False)
+        report.expect_eq("PAYCHECK type INCOME", paycheck_d["transaction_type"], "INCOME")
+        report.expect_eq("ATM REVERSAL is_spend", reversal_d["is_spend"], True)
         report.expect_eq("PAYCHECK amount", str(paycheck["amount"]), "1234.56")
         report.expect_eq("GROCERY amount", str(grocery["amount"]), "-54.32")
         report.expect_eq("ATM REVERSAL amount", str(reversal["amount"]), "-12.00")
@@ -481,19 +509,22 @@ def run(client, suffix: str, report: Report) -> None:
     if starbucks is None:
         report.record("PATCH Starbucks", "found", "missing", False)
     else:
+        starbucks_d = _txn_detail(client, starbucks["id"])
         report.expect_eq(
             "Chase extracts STARBUCKS from description",
-            starbucks.get("merchant_raw"),
+            starbucks_d.get("merchant_raw"),
             "STARBUCKS",
         )
-        by_merchant = client.get("/transactions", params={"merchant": "STARBUCKS"})
+        by_merchant = client.get(
+            "/transactions", params={"merchant": "STARBUCKS", "limit": 100}
+        )
         if report.expect_status("GET /transactions?merchant=STARBUCKS", by_merchant, 200):
             report.expect_eq(
                 "merchant filter finds Starbucks without identity map",
-                [row["id"] for row in by_merchant.json()],
+                [row["id"] for row in _txn_rows(by_merchant)],
                 [starbucks["id"]],
             )
-        raw_before = starbucks["category_raw"]
+        raw_before = starbucks_d["category_raw"]
         patched = client.patch(
             f"/transactions/{starbucks['id']}",
             json={"category_override": "Cafes"},
@@ -503,11 +534,11 @@ def run(client, suffix: str, report: Report) -> None:
             report.expect_eq("override set", body["category_override"], "Cafes")
             report.expect_eq("category_raw unchanged", body["category_raw"], raw_before)
 
-        cafes = client.get("/transactions", params={"category": "Cafes"})
+        cafes = client.get("/transactions", params={"category": "Cafes", "limit": 100})
         if report.expect_status("GET /transactions?category=Cafes", cafes, 200):
             report.expect_eq(
                 "override wins category filter",
-                [row["id"] for row in cafes.json()],
+                [row["id"] for row in _txn_rows(cafes)],
                 [starbucks["id"]],
             )
 
@@ -518,9 +549,11 @@ def run(client, suffix: str, report: Report) -> None:
             )
             if report.expect_status("PATCH owner_id to Partner", moved, 200):
                 report.expect_eq("owner_id updated", moved.json()["owner_id"], partner_id)
-            by_partner = client.get("/transactions", params={"owner_id": partner_id})
+            by_partner = client.get(
+                "/transactions", params={"owner_id": partner_id, "limit": 100}
+            )
             if report.expect_status("GET /transactions?owner_id=Partner", by_partner, 200):
-                ids = {row["id"] for row in by_partner.json()}
+                ids = {row["id"] for row in _txn_rows(by_partner)}
                 report.expect_in("Partner list includes patched Starbucks", starbucks["id"], ids)
 
         missing_txn = client.patch("/transactions/999999", json={"category_override": "X"})
@@ -552,7 +585,7 @@ def run(client, suffix: str, report: Report) -> None:
 
     by_cat = client.get("/analytics/by-category")
     if report.expect_status("GET /analytics/by-category", by_cat, 200):
-        cats = {row["group_value"]: row for row in by_cat.json()}
+        cats = {row["group_value"]: row for row in _summary_groups(by_cat)}
         report.expect_in("category Cafes after override", "Cafes", cats)
         report.expect_eq("Dining absent after override", "Dining" in cats, False)
         if "Shopping" in cats:
@@ -576,18 +609,18 @@ def run(client, suffix: str, report: Report) -> None:
 
     by_owner = client.get("/analytics/by-owner")
     if report.expect_status("GET /analytics/by-owner", by_owner, 200):
-        owners = {row["group_value"]: row for row in by_owner.json()}
+        owners = {row["group_value"]: row for row in _summary_groups(by_owner)}
         report.expect_in("owner grouping has Partner", partner, owners)
         report.expect_in("owner grouping has Camilo", camilo, owners)
 
     by_month = client.get("/analytics/by-month")
     if report.expect_status("GET /analytics/by-month", by_month, 200):
-        months = [row["group_value"] for row in by_month.json()]
+        months = [row["group_value"] for row in _summary_groups(by_month)]
         report.expect_in("month 2024-06 present", "2024-06", months)
 
     by_account = client.get("/analytics/summary", params={"group_by": "account"})
     if report.expect_status("GET /analytics/summary?group_by=account", by_account, 200):
-        names = {row["group_value"] for row in by_account.json()}
+        names = {row["group_value"] for row in _summary_groups(by_account)}
         report.expect_in("account grouping has Apple Card", f"Apple Card{suffix}", names)
 
     totals = client.get("/analytics/total")
@@ -615,7 +648,7 @@ def run(client, suffix: str, report: Report) -> None:
 
     by_merchant_group = client.get("/analytics/summary", params={"group_by": "merchant"})
     if report.expect_status("GET /analytics/summary?group_by=merchant", by_merchant_group, 200):
-        merchant_names = {row["group_value"] for row in by_merchant_group.json()}
+        merchant_names = {row["group_value"] for row in _summary_groups(by_merchant_group)}
         report.expect_in("group_by merchant has STARBUCKS", "STARBUCKS", merchant_names)
         report.expect_in("group_by merchant has Apple column value", "Apple", merchant_names)
 
@@ -645,8 +678,13 @@ def run(client, suffix: str, report: Report) -> None:
         body = search.json()
         descs = {row["description"] for row in body.get("transactions", [])}
         report.expect_in("search finds AMAZON MARKETPLACE", "AMAZON MARKETPLACE", descs)
-        types = {row["transaction_type"] for row in body.get("transactions", [])}
+        types = {row["effective_type"] for row in body.get("transactions", [])}
         report.expect_in("search includes REFUND", "REFUND", types)
+
+    values = client.get("/analytics/values", params={"dimension": "category"})
+    if report.expect_status("GET /analytics/values?dimension=category", values, 200):
+        names = {row["value"] for row in values.json().get("values", [])}
+        report.expect_in("values catalog has Cafes", "Cafes", names)
 
     unmapped = client.get("/analytics/unmapped")
     if report.expect_status("GET /analytics/unmapped", unmapped, 200):

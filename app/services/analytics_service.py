@@ -12,16 +12,18 @@ from sqlalchemy import Select, func, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import ColumnElement
 
-from app.domain.classification import TransactionType
+from app.domain.classification import TransactionType, has_wildcard
 from app.models import Account, Owner, Transaction, effective_category, effective_merchant, effective_type
 from app.services.label_filter import (
     ResolvedLabelFilters,
     apply_resolved_label_filters,
     resolve_label_filters,
 )
+from app.services.transaction_view import page_meta, transaction_card, transaction_detail
 
 UNASSIGNED = "(unassigned)"
 GroupBy = Literal["category", "owner", "month", "account", "merchant", "subcategory"]
+ValueDimension = Literal["category", "subcategory", "merchant"]
 
 _KNOWN_CASH_FLOW_TYPES = frozenset(
     {
@@ -48,6 +50,48 @@ def _resolve_optional_label_filters(
     return resolve_label_filters(db, category, subcategory)
 
 
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("_", "\\_")
+
+
+def merchant_clause(merchant: str) -> ColumnElement:
+    """Exact equality unless ``merchant`` contains ``%`` (SQL ILIKE, ``_`` literal)."""
+    if not has_wildcard(merchant):
+        return effective_merchant == merchant
+    return effective_merchant.ilike(_escape_like(merchant), escape="\\")
+
+
+def contains_clause(column: ColumnElement, value: str) -> ColumnElement:
+    """Case-insensitive contains. A ``%`` in ``value`` is a user wildcard."""
+    escaped = _escape_like(value.strip())
+    if has_wildcard(value):
+        return column.ilike(escaped, escape="\\")
+    return column.ilike(f"%{escaped}%", escape="\\")
+
+
+def text_query_clause(query: str) -> ColumnElement:
+    """Substring match across payee, labels, and raw type/owner fields."""
+    pattern = f"%{query}%"
+    return or_(
+        Transaction.description.ilike(pattern),
+        effective_merchant.ilike(pattern),
+        Transaction.merchant_raw.ilike(pattern),
+        Transaction.merchant_normalized.ilike(pattern),
+        Transaction.merchant_override.ilike(pattern),
+        Transaction.category_raw.ilike(pattern),
+        Transaction.category_normalized.ilike(pattern),
+        Transaction.category_override.ilike(pattern),
+        Transaction.subcategory.ilike(pattern),
+        Transaction.raw_type.ilike(pattern),
+        Transaction.owner_raw.ilike(pattern),
+    )
+
+
+def _count_rows(db: Session, stmt: Select[Any]) -> int:
+    subq = stmt.order_by(None).with_only_columns(Transaction.id).subquery()
+    return int(db.scalar(select(func.count()).select_from(subq)) or 0)
+
+
 def _apply_filters(
     stmt: Select[Any],
     db: Session,
@@ -58,8 +102,15 @@ def _apply_filters(
     merchant: str | None = None,
     transaction_type: str | None = None,
     label_filters: ResolvedLabelFilters | None = None,
+    default_date_to: bool = True,
+    merchant_contains: bool = False,
+    loose_category: str | None = None,
+    loose_subcategory: str | None = None,
 ) -> Select[Any]:
-    stmt = stmt.where(Transaction.transaction_date <= _resolved_date_to(date_to))
+    if default_date_to:
+        stmt = stmt.where(Transaction.transaction_date <= _resolved_date_to(date_to))
+    elif date_to is not None:
+        stmt = stmt.where(Transaction.transaction_date <= date_to)
     if date_from is not None:
         stmt = stmt.where(Transaction.transaction_date >= date_from)
     if account_id is not None:
@@ -67,11 +118,18 @@ def _apply_filters(
     if owner_id is not None:
         stmt = stmt.where(Transaction.owner_id == owner_id)
     if merchant is not None:
-        stmt = stmt.where(effective_merchant == merchant)
+        if merchant_contains:
+            stmt = stmt.where(contains_clause(effective_merchant, merchant))
+        else:
+            stmt = stmt.where(merchant_clause(merchant))
     if transaction_type is not None:
         stmt = stmt.where(effective_type == transaction_type)
     if label_filters is not None:
         stmt = apply_resolved_label_filters(stmt, label_filters)
+    if loose_category is not None and str(loose_category).strip():
+        stmt = stmt.where(contains_clause(effective_category, loose_category))
+    if loose_subcategory is not None and str(loose_subcategory).strip():
+        stmt = stmt.where(contains_clause(Transaction.subcategory, loose_subcategory))
     return stmt
 
 
@@ -207,8 +265,11 @@ def _totals_by_type(
     merchant: str | None,
     *,
     group_by: GroupBy | None = None,
-    description_query: str | None = None,
+    text_query: str | None = None,
     label_filters: ResolvedLabelFilters | None = None,
+    merchant_contains: bool = False,
+    loose_category: str | None = None,
+    loose_subcategory: str | None = None,
 ) -> list[dict[str, Any]]:
     total_col = func.coalesce(func.sum(func.abs(Transaction.amount)), 0)
     count_col = func.count(Transaction.id)
@@ -228,9 +289,12 @@ def _totals_by_type(
             owner_id,
             merchant=merchant,
             label_filters=label_filters,
+            merchant_contains=merchant_contains,
+            loose_category=loose_category,
+            loose_subcategory=loose_subcategory,
         )
-        if description_query is not None:
-            stmt = stmt.where(Transaction.description.ilike(f"%{description_query}%"))
+        if text_query is not None:
+            stmt = stmt.where(text_query_clause(text_query))
         stmt = stmt.group_by(effective_type).order_by(effective_type)
         return [
             {
@@ -266,9 +330,12 @@ def _totals_by_type(
         owner_id,
         merchant=merchant,
         label_filters=label_filters,
+        merchant_contains=merchant_contains,
+        loose_category=loose_category,
+        loose_subcategory=loose_subcategory,
     )
-    if description_query is not None:
-        stmt = stmt.where(Transaction.description.ilike(f"%{description_query}%"))
+    if text_query is not None:
+        stmt = stmt.where(text_query_clause(text_query))
 
     stmt = stmt.group_by(key, effective_type).order_by(key, effective_type)
     return [
@@ -324,7 +391,8 @@ def summarize(
     transaction_type: str | None = None,
     category: str | None = None,
     subcategory: str | None = None,
-) -> list[dict[str, Any]]:
+    limit: int | None = None,
+) -> dict[str, Any]:
     label_filters = _resolve_optional_label_filters(db, category, subcategory)
     rows = _totals_by_type(
         db,
@@ -336,7 +404,11 @@ def summarize(
         group_by=group_by,
         label_filters=label_filters,
     )
-    return _summarize_grouped_rows(rows, transaction_type, group_by, db, account_id)
+    groups = _summarize_grouped_rows(rows, transaction_type, group_by, db, account_id)
+    match_count = len(groups)
+    if limit is not None:
+        groups = groups[:limit]
+    return {"groups": groups, **page_meta(match_count, len(groups))}
 
 
 def get_total(
@@ -422,6 +494,7 @@ def largest_transactions(
         transaction_type=transaction_type,
         label_filters=label_filters,
     )
+    match_count = _count_rows(db, stmt)
     stmt = stmt.order_by(func.abs(Transaction.amount).desc(), Transaction.id).limit(limit)
     transactions = list(db.scalars(stmt).all())
 
@@ -436,7 +509,12 @@ def largest_transactions(
     )
     totals = _derive_totals(by_type, transaction_type)
     _attach_sign_convention(totals, db, account_id)
-    return {"totals": totals, "transactions": transactions}
+    cards = [transaction_card(txn) for txn in transactions]
+    return {
+        "totals": totals,
+        "transactions": cards,
+        **page_meta(match_count, len(cards)),
+    }
 
 
 def search_transactions(
@@ -451,6 +529,65 @@ def search_transactions(
     category: str | None = None,
     subcategory: str | None = None,
 ) -> dict[str, Any]:
+    stmt = select(Transaction)
+    stmt = _apply_filters(
+        stmt,
+        db,
+        date_from,
+        date_to,
+        account_id,
+        owner_id,
+        merchant=merchant,
+        merchant_contains=True,
+        loose_category=category,
+        loose_subcategory=subcategory,
+    )
+    stmt = stmt.where(text_query_clause(query))
+    match_count = _count_rows(db, stmt)
+    stmt = stmt.order_by(Transaction.transaction_date, Transaction.id).limit(limit)
+    transactions = list(db.scalars(stmt).all())
+
+    by_type = _totals_by_type(
+        db,
+        date_from,
+        date_to,
+        account_id,
+        owner_id,
+        merchant,
+        text_query=query,
+        merchant_contains=True,
+        loose_category=category,
+        loose_subcategory=subcategory,
+    )
+    totals = _derive_totals(by_type)
+    _attach_sign_convention(totals, db, account_id)
+    cards = [transaction_card(txn) for txn in transactions]
+    return {
+        "totals": totals,
+        "transactions": cards,
+        **page_meta(match_count, len(cards)),
+    }
+
+
+def get_transaction(db: Session, transaction_id: int) -> dict[str, Any] | None:
+    txn = db.get(Transaction, transaction_id)
+    if txn is None:
+        return None
+    return transaction_detail(txn)
+
+
+def list_transactions(
+    db: Session,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    account_id: int | None = None,
+    owner_id: int | None = None,
+    merchant: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
+    limit: int = 25,
+) -> dict[str, Any]:
+    """List rows. Does not default date_to. Cards only — use get for triples."""
     label_filters = _resolve_optional_label_filters(db, category, subcategory)
     stmt = select(Transaction)
     stmt = _apply_filters(
@@ -462,24 +599,57 @@ def search_transactions(
         owner_id,
         merchant=merchant,
         label_filters=label_filters,
+        default_date_to=False,
     )
-    stmt = stmt.where(Transaction.description.ilike(f"%{query}%"))
+    match_count = _count_rows(db, stmt)
     stmt = stmt.order_by(Transaction.transaction_date, Transaction.id).limit(limit)
-    transactions = list(db.scalars(stmt).all())
+    rows = list(db.scalars(stmt).all())
+    cards = [transaction_card(txn) for txn in rows]
+    return {"transactions": cards, **page_meta(match_count, len(cards))}
 
-    by_type = _totals_by_type(
+
+def list_values(
+    db: Session,
+    dimension: ValueDimension,
+    query: str | None = None,
+    limit: int = 25,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    account_id: int | None = None,
+    owner_id: int | None = None,
+) -> dict[str, Any]:
+    columns: dict[str, ColumnElement] = {
+        "category": effective_category,
+        "subcategory": Transaction.subcategory,
+        "merchant": effective_merchant,
+    }
+    if dimension not in columns:
+        raise ValueError(f"unsupported dimension: {dimension}")
+    col = columns[dimension]
+    stmt = (
+        select(col, func.count(Transaction.id))
+        .select_from(Transaction)
+        .where(col.isnot(None), func.trim(col) != "")
+    )
+    stmt = _apply_filters(
+        stmt,
         db,
         date_from,
         date_to,
         account_id,
         owner_id,
-        merchant,
-        description_query=query,
-        label_filters=label_filters,
+        default_date_to=False,
     )
-    totals = _derive_totals(by_type)
-    _attach_sign_convention(totals, db, account_id)
-    return {"totals": totals, "transactions": transactions}
+    if query is not None and str(query).strip():
+        stmt = stmt.where(col.ilike(f"%{str(query).strip()}%"))
+    stmt = stmt.group_by(col).order_by(func.count(Transaction.id).desc(), col)
+    rows = db.execute(stmt).all()
+    match_count = len(rows)
+    limited = rows[:limit]
+    return {
+        "values": [{"value": str(value), "count": int(count)} for value, count in limited],
+        **page_meta(match_count, len(limited)),
+    }
 
 
 def cash_flow(
@@ -575,4 +745,76 @@ def unmapped_summary(db: Session) -> dict[str, list[str]]:
         "owners": list(owners),
         "merchants": list(merchants),
         "merchants_without_category": list(merchants_without_category),
+    }
+
+
+def _or_unassigned(value: str | None) -> str:
+    if value is None or not str(value).strip():
+        return UNASSIGNED
+    return str(value).strip()
+
+
+def ledger_snapshot(db: Session) -> dict[str, Any]:
+    """Whole-ledger catalog for analyst turn context. Not a spend total."""
+    transaction_count = int(
+        db.scalar(select(func.count()).select_from(Transaction)) or 0
+    )
+    merchant_subq = (
+        select(effective_merchant)
+        .where(
+            effective_merchant.isnot(None),
+            func.trim(effective_merchant) != "",
+        )
+        .distinct()
+        .subquery()
+    )
+    merchant_count = int(
+        db.scalar(select(func.count()).select_from(merchant_subq)) or 0
+    )
+    owners = [
+        {"id": row.id, "name": row.name}
+        for row in db.scalars(select(Owner).order_by(Owner.id)).all()
+    ]
+    pair_counts: dict[tuple[str, str], int] = defaultdict(int)
+    for category, subcategory, count in db.execute(
+        select(
+            effective_category,
+            Transaction.subcategory,
+            func.count(Transaction.id),
+        )
+        .select_from(Transaction)
+        .group_by(effective_category, Transaction.subcategory)
+    ).all():
+        pair_counts[
+            (_or_unassigned(category), _or_unassigned(subcategory))
+        ] += int(count)
+
+    cat_totals: dict[str, int] = defaultdict(int)
+    cat_subs: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    for (category, subcategory), count in pair_counts.items():
+        cat_totals[category] += count
+        cat_subs[category].append((subcategory, count))
+
+    categories: list[dict[str, Any]] = []
+    for name, total in sorted(cat_totals.items(), key=lambda item: (-item[1], item[0])):
+        real = sorted(
+            [(sub, count) for sub, count in cat_subs[name] if sub != UNASSIGNED],
+            key=lambda item: (-item[1], item[0]),
+        )
+        unassigned = [
+            (sub, count) for sub, count in cat_subs[name] if sub == UNASSIGNED
+        ]
+        subcategories = [{"name": sub, "count": count} for sub, count in real]
+        if real:
+            subcategories.extend(
+                {"name": sub, "count": count} for sub, count in unassigned
+            )
+        categories.append(
+            {"name": name, "count": total, "subcategories": subcategories}
+        )
+    return {
+        "transaction_count": transaction_count,
+        "merchant_count": merchant_count,
+        "owners": owners,
+        "categories": categories,
     }

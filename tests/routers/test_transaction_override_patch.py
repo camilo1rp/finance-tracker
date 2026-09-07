@@ -122,8 +122,10 @@ def test_patch_subcategory(client: TestClient, db_session: Session) -> None:
     )
     assert response.status_code == 200
     assert response.json()["subcategory"] == "card_payment"
-    listed = client.get("/transactions", params={"account_id": account.id})
-    assert listed.json()[0]["subcategory"] == "card_payment"
+    from tests.api_helpers import listed
+
+    rows = listed(client.get("/transactions", params={"account_id": account.id}))
+    assert rows[0]["subcategory"] == "card_payment"
 
     cleared = client.patch(f"/transactions/{txn.id}", json={"subcategory": None})
     assert cleared.status_code == 200

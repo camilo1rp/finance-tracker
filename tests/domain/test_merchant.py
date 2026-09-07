@@ -1,3 +1,4 @@
+from app.domain.effective import resolved_value
 from app.domain.merchant import extract_merchant, resolved_merchant
 
 
@@ -32,3 +33,8 @@ def test_resolved_merchant_precedence() -> None:
     assert resolved_merchant("RAW", "Normalized") == "Normalized"
     assert resolved_merchant("RAW", None) == "RAW"
     assert resolved_merchant(None, None) is None
+
+
+def test_resolved_value_skips_blank() -> None:
+    assert resolved_value(None, "  ", "Dining") == "Dining"
+    assert resolved_value(None, None) is None

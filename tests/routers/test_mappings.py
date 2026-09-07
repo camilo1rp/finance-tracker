@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.domain.classification import NormalizationKind
 from app.domain.db_lookup import DbNormalizationLookup
 from app.models import Transaction
+from tests.api_helpers import details
 
 
 def _category_mappings(client: TestClient) -> list[dict]:
@@ -103,6 +104,39 @@ def test_list_and_delete_mapping(client: TestClient) -> None:
     assert "reclass_updated" in body
     assert client.get("/mappings").json() == []
     assert client.delete(f"/mappings/{created['id']}").status_code == 404
+
+
+def test_list_mappings_include_global(client: TestClient) -> None:
+    account_id = _account(client)
+    global_row = client.post(
+        "/mappings",
+        json={"kind": "category", "raw_value": "Food", "canonical_value": "Dining"},
+    ).json()
+    scoped = client.post(
+        "/mappings",
+        json={
+            "kind": "category",
+            "raw_value": "Shop",
+            "canonical_value": "Shopping",
+            "account_id": account_id,
+        },
+    ).json()
+    with_global = client.get(
+        "/mappings", params={"kind": "category", "account_id": account_id}
+    )
+    with_ids = {row["id"] for row in with_global.json()}
+    assert global_row["id"] in with_ids
+    assert scoped["id"] in with_ids
+    assert all(row["account_id"] in (None, account_id) for row in with_global.json())
+    scoped_only = client.get(
+        "/mappings",
+        params={
+            "kind": "category",
+            "account_id": account_id,
+            "include_global": False,
+        },
+    )
+    assert [row["id"] for row in scoped_only.json()] == [scoped["id"]]
 
 
 def test_db_lookup_prefers_account_rule(client: TestClient, db_session: Session) -> None:
@@ -338,7 +372,7 @@ def test_preview_and_apply_endpoints(client: TestClient, db_session: Session) ->
     assert payload["ops"][0]["would_change"] == 1
     assert _category_mappings(client) == []
 
-    listed_before = client.get("/transactions", params={"account_id": account_id}).json()
+    listed_before = details(client, account_id=account_id)
     assert listed_before[0]["category_normalized"] is None
 
     applied = client.post("/mappings/apply", json=body)
@@ -354,7 +388,7 @@ def test_preview_and_apply_endpoints(client: TestClient, db_session: Session) ->
     mappings = _category_mappings(client)
     assert len(mappings) == 1
     assert mappings[0]["raw_value"] == "food & drink"
-    listed = client.get("/transactions", params={"account_id": account_id}).json()
+    listed = details(client, account_id=account_id)
     assert listed[0]["category_normalized"] == "Dining"
 
     again = client.post("/mappings/apply", json=body)
@@ -420,7 +454,7 @@ def test_patch_and_delete_reclassify(client: TestClient, db_session: Session) ->
     assert body["id"] == created["id"]
     assert body["canonical_value"] == "Cafes"
     assert body["reclass_updated"] == 1
-    listed = client.get("/transactions", params={"account_id": account_id}).json()
+    listed = details(client, account_id=account_id)
     assert listed[0]["category_normalized"] == "Cafes"
 
     missing = client.patch("/mappings/999999", json={"canonical_value": "X"})
@@ -430,7 +464,7 @@ def test_patch_and_delete_reclassify(client: TestClient, db_session: Session) ->
     assert deleted.status_code == 200, deleted.text
     assert deleted.json()["deleted_id"] == created["id"]
     assert deleted.json()["reclass_updated"] == 1
-    listed = client.get("/transactions", params={"account_id": account_id}).json()
+    listed = details(client, account_id=account_id)
     assert listed[0]["category_normalized"] is None
     assert _category_mappings(client) == []
 
@@ -489,5 +523,5 @@ def test_create_empty_category_merchant_rule(client: TestClient, db_session: Ses
     assert result.status_code == 200, result.text
     assert result.json()["unmapped"]["merchants_without_category"] == []
 
-    listed = client.get("/transactions", params={"account_id": account_id}).json()
+    listed = details(client, account_id=account_id)
     assert listed[0]["category_normalized"] == "taxes"

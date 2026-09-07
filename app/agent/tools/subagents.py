@@ -65,10 +65,10 @@ def make_subagent_tools(*, analyst, steward, enricher):
     @tool(
         "ask_analyst",
         description=(
-            "Delegate spending analysis: comparisons across months/owners/accounts/"
-            "merchants/categories, trends, largest or unusual transactions, description "
-            "search. Include all relevant scope in the task: exact date ranges, "
-            "owner/account ids, whether refunds should be included."
+            "Delegate insights and discovery: comparisons, trends, patterns, and "
+            "anything that may be mislabeled or split across names. Include date "
+            "ranges, owner/account ids, and whether refunds count. Use this when "
+            "the question is open, not only as a last resort."
         ),
     )
     def ask_analyst(task: str) -> str:

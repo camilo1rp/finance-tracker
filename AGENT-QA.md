@@ -95,6 +95,7 @@ Compare <Month B> vs <Month A> by category for <owner name>
 - Filters stated (owner, dates)
 - Deltas match subtracting the two `GET /analytics/summary?group_by=category&owner_id=...` calls for those date ranges (spot-check 2–3 categories, including `(unassigned)` if it appears)
 - No approval interrupt
+- First analyst turn already knows stored category/subcategory spellings, owners, and ledger scale (attached like the current date); it should not need a `list_values` call just to learn the taxonomy
 
 Follow-up on the **same thread** (context should still know the owner/month):
 
@@ -110,7 +111,7 @@ One search / listing check:
 Find transactions whose description contains <a merchant fragment you know>
 ```
 
-**Pass:** hits include refunds/payments if they match (search is **not** spend-only). Response is `{totals, transactions}`; list matches `GET /analytics/search?query=...`; `totals` covers all query matches.
+**Pass:** hits include refunds/payments if they match (search is **not** spend-only). Query is a loose substring across description, merchant, category, type, and owner fields. Response is `{totals, transactions, match_count, returned, truncated}`; list matches `GET /analytics/search?query=...`; `totals` covers all query matches.
 
 ---
 
@@ -220,7 +221,7 @@ These are the domain footguns. After a total/summary answer, confirm against the
 | `(unassigned)` | Null owner/category groups appear under that label, not dropped |
 | Month buckets `YYYY-MM`, ascending | A `by month` answer is chronological, not largest-first |
 
-Ask one question that **should** stay on the coordinator (`total for Month A`) and one that **should not** (`compare Month B vs Month A by merchant`). If the compare answer has no per-group deltas, the analyst path is not actually composing two summaries.
+Ask one **closed** question that should stay on the coordinator (`total for Month A`) and one **open** question that should go to the analyst (`compare Month B vs Month A by merchant`, or a discovery ask such as subscriptions). A catalog or labeled total is not enough for the open case; if the compare answer has no per-group deltas, the analyst path is not actually composing two summaries.
 
 ---
 

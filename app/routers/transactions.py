@@ -1,17 +1,24 @@
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_session
 from app.domain.classification import TransactionType
 from app.domain.label_filter import UnknownLabelFilterError
-from app.models import Owner, Transaction, TransactionOverride, effective_merchant
+from app.models import Owner, Transaction, TransactionOverride
 from app.domain.transaction_type_resolver import is_effective_spend
-from app.schemas import ReclassifyResultOut, TransactionOut, TransactionPatch, UnmappedValuesOut
+from app.schemas import (
+    ReclassifyResultOut,
+    TransactionOut,
+    TransactionPage,
+    TransactionPatch,
+    UnmappedValuesOut,
+)
+from app.services import analytics_service
 from app.services.ingest_service import AccountNotFoundError, reclassify_transactions
-from app.services.label_filter import apply_resolved_label_filters, resolve_label_filters
+from app.services.transaction_view import transaction_detail
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
@@ -40,7 +47,7 @@ def reclassify(
     )
 
 
-@router.get("", response_model=list[TransactionOut])
+@router.get("", response_model=TransactionPage)
 def list_transactions(
     date_from: date | None = None,
     date_to: date | None = None,
@@ -49,37 +56,42 @@ def list_transactions(
     merchant: str | None = None,
     subcategory: str | None = None,
     account_id: int | None = None,
+    limit: int = Query(default=25, ge=1),
     db: Session = Depends(get_session),
-) -> list[TransactionOut]:
-    """`category` / `subcategory` must exist on stored transactions (case and
-    whitespace insensitive). When both are set, rows must match both. `merchant`
-    filters against effective merchant."""
+) -> TransactionPage:
+    """Compact cards. Does not default date_to. `merchant` is exact unless it
+    contains `%`. Unknown category/subcategory → 422 with available labels."""
     try:
-        label_filters = (
-            resolve_label_filters(db, category, subcategory)
-            if category is not None or subcategory is not None
-            else None
+        return analytics_service.list_transactions(
+            db,
+            date_from=date_from,
+            date_to=date_to,
+            account_id=account_id,
+            owner_id=owner_id,
+            merchant=merchant,
+            category=category,
+            subcategory=subcategory,
+            limit=limit,
         )
     except UnknownLabelFilterError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=exc.detail,
         ) from exc
-    stmt = select(Transaction)
-    if date_from is not None:
-        stmt = stmt.where(Transaction.transaction_date >= date_from)
-    if date_to is not None:
-        stmt = stmt.where(Transaction.transaction_date <= date_to)
-    if owner_id is not None:
-        stmt = stmt.where(Transaction.owner_id == owner_id)
-    if account_id is not None:
-        stmt = stmt.where(Transaction.account_id == account_id)
-    if merchant is not None:
-        stmt = stmt.where(effective_merchant == merchant)
-    if label_filters is not None:
-        stmt = apply_resolved_label_filters(stmt, label_filters)
-    stmt = stmt.order_by(Transaction.transaction_date, Transaction.id)
-    return list(db.scalars(stmt).all())
+
+
+@router.get("/{transaction_id}", response_model=TransactionOut)
+def get_transaction(
+    transaction_id: int,
+    db: Session = Depends(get_session),
+) -> TransactionOut:
+    row = analytics_service.get_transaction(db, transaction_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"transaction {transaction_id} not found",
+        )
+    return TransactionOut.model_validate(row)
 
 
 @router.patch("/{transaction_id}", response_model=TransactionOut)
@@ -130,4 +142,4 @@ def patch_transaction(
         txn.is_spend = is_effective_spend(txn.transaction_type, txn.type_override)
     db.commit()
     db.refresh(txn)
-    return txn
+    return TransactionOut.model_validate(transaction_detail(txn))

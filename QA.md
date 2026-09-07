@@ -216,12 +216,11 @@ Already-imported rows do not pick up new rules by themselves. After adding mappi
 
 ## 3. Spot-check data (5 min)
 
-`GET /transactions?account_id={chase_id}`
+`GET /transactions?account_id={chase_id}` returns `{transactions, match_count, returned, truncated}` of compact cards (`effective_type`, `effective_category`, `effective_merchant`). Use `GET /transactions/{id}` for triples, `raw_type`, and `owner_raw`.
 
-- A `Sale` / `Purchase` is `transaction_type=SPEND`, `is_spend=true`
-- A card `Payment` is `TRANSFER`, `is_spend=false`
-- Sign-only paycheck credits are `INCOME`, `is_spend=false`
-- `category_raw` matches the file; `category_normalized` is set only if you mapped it
+- A `Sale` / `Purchase` is `effective_type=SPEND`
+- A card `Payment` is `TRANSFER`
+- Sign-only paycheck credits are `INCOME`
 - Chase rows use the default owner
 - Apple rows with `Purchased By` have the right `owner_id`
 
@@ -237,15 +236,16 @@ All analytics endpoints return a full type breakdown (`purchases`, `refunds`, `s
 
 | Call | What to look for |
 |---|---|
-| `GET /analytics/by-category` | Same breakdown as `/total` per category (`spend` = purchases − refunds); override category appears |
-| `GET /analytics/by-subcategory` | Same breakdown per stored `subcategory`; nulls show as `(unassigned)` |
-| `GET /analytics/by-owner` | Same breakdown per owner; Chase default owner + Apple people; nulls show as `(unassigned)` |
-| `GET /analytics/by-month` | `YYYY-MM` buckets, chronological; each bucket has purchases/refunds/spend |
+| `GET /analytics/values?dimension=category` | Catalog of stored labels `{value, count}` before filtering |
+| `GET /analytics/by-category` | `{groups, match_count, returned, truncated}`; each group has the `/total` breakdown; `?limit=` for top N |
+| `GET /analytics/by-subcategory` | Same page shape per stored `subcategory`; nulls show as `(unassigned)` |
+| `GET /analytics/by-owner` | Same page shape per owner; Chase default owner + Apple people; nulls show as `(unassigned)` |
+| `GET /analytics/by-month` | `YYYY-MM` buckets, chronological |
 | `GET /analytics/summary?group_by=account` | Chase vs Apple with shared totals fields |
 | `GET /analytics/total` | `spend` = purchases − refunds; `net_cash_flow` = income + refunds − purchases − fees |
 | `GET /analytics/top-merchants?limit=10` | Merchants sorted by `spend`; each row has full breakdown |
-| `GET /analytics/largest?limit=5` | `{totals, transactions}`; list is biggest **absolute** spends |
-| `GET /analytics/search?query=` | `{totals, transactions}`; totals scoped to query; refunds/payments **do** appear in list |
+| `GET /analytics/largest?limit=5` | `{totals, transactions, match_count, returned, truncated}`; compact cards |
+| `GET /analytics/search?query=` | Same page shape; loose substring across description, merchant, category, type, owner |
 | `GET /analytics/unmapped` | Shrinks after you added rules; leftover is the real worklist |
 | `GET /analytics/cash-flow` | Same core fields as `/total` plus income/fees/transfers/other; `net_cash_flow` excludes transfers and `other` |
 

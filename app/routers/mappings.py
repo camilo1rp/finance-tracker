@@ -22,6 +22,7 @@ from app.schemas import (
     UpdateMappingOp,
 )
 from app.services.ingest_service import AccountNotFoundError
+from app.services.mapping_query import list_normalization_mappings
 from app.services.mapping_preview_service import (
     MappingPlanValidationError,
     apply_mapping_plan,
@@ -147,14 +148,16 @@ def create_mapping(
 def list_mappings(
     kind: str | None = None,
     account_id: int | None = None,
+    include_global: bool = True,
     db: Session = Depends(get_session),
 ) -> list[NormalizationMappingOut]:
-    stmt = select(NormalizationMapping)
-    if kind is not None:
-        stmt = stmt.where(NormalizationMapping.kind == _validate_kind(kind).value)
-    if account_id is not None:
-        stmt = stmt.where(NormalizationMapping.account_id == account_id)
-    return list(db.scalars(stmt.order_by(NormalizationMapping.id)).all())
+    resolved_kind = _validate_kind(kind).value if kind is not None else None
+    return list_normalization_mappings(
+        db,
+        kind=resolved_kind,
+        account_id=account_id,
+        include_global=include_global,
+    )
 
 
 @router.post(

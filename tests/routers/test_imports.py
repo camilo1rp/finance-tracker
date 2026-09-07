@@ -2,6 +2,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from tests.api_helpers import details, listed
+
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "sample.csv"
 
 ACCOUNT_MAPPING = {
@@ -68,9 +70,7 @@ def test_import_pipeline_dedupe_filter_and_patch(client: TestClient) -> None:
     assert second.json()["inserted"] == 0
     assert second.json()["duplicates_skipped"] == 4
 
-    listed = client.get("/transactions", params={"owner_id": owner_id})
-    assert listed.status_code == 200
-    owned = listed.json()
+    owned = details(client, owner_id=owner_id)
     assert len(owned) == 3
     coffee = next(row for row in owned if row["description"] == "Coffee Shop")
     assert coffee["category_normalized"] == "Dining"
@@ -78,9 +78,9 @@ def test_import_pipeline_dedupe_filter_and_patch(client: TestClient) -> None:
     assert coffee["owner_id"] == owner_id
     assert coffee["is_spend"] is True
 
-    jane_rows = client.get("/transactions")
+    jane_rows = details(client)
     unknown = next(
-        row for row in jane_rows.json() if row["description"] == "Unknown Merchant"
+        row for row in jane_rows if row["description"] == "Unknown Merchant"
     )
     assert unknown["owner_id"] is None
     assert unknown["category_normalized"] is None
@@ -94,8 +94,8 @@ def test_import_pipeline_dedupe_filter_and_patch(client: TestClient) -> None:
     assert patched.json()["category_override"] == "Cafes"
     assert patched.json()["category_raw"] == "Food & Drink"
 
-    filtered = client.get("/transactions", params={"category": "Cafes"})
-    assert [row["id"] for row in filtered.json()] == [coffee["id"]]
+    filtered = listed(client.get("/transactions", params={"category": "Cafes"}))
+    assert [row["id"] for row in filtered] == [coffee["id"]]
 
 
 def _import_csv(client: TestClient, account_id: int, csv: str, *, allow_duplicates: bool = False):
@@ -139,7 +139,7 @@ def test_import_allow_duplicates_inserts_identical_rows(client: TestClient) -> N
 
     coffees = [
         row
-        for row in client.get("/transactions", params={"account_id": account_id}).json()
+        for row in listed(client.get("/transactions", params={"account_id": account_id}))
         if row["description"] == "Coffee Shop"
     ]
     assert len(coffees) == 2

@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.models import Account, Owner, Transaction
+from tests.api_helpers import details
 
 
 def test_reclassify_applies_new_type_and_category_mappings(
@@ -64,8 +65,7 @@ def test_reclassify_applies_new_type_and_category_mappings(
     assert body["unmapped"]["transaction_types"] == []
     assert body["unmapped"]["categories"] == []
 
-    listed = client.get("/transactions", params={"account_id": account["id"]})
-    row = listed.json()[0]
+    row = details(client, account_id=account["id"])[0]
     assert row["transaction_type"] == "REFUND"
     assert row["is_spend"] is False
     assert row["category_normalized"] == "Dining"
@@ -121,7 +121,7 @@ def test_reclassify_backfills_merchant_from_description(
     assert result.json()["updated"] == 1
     assert result.json()["unmapped"]["merchants"] == []
 
-    row = client.get("/transactions", params={"account_id": account["id"]}).json()[0]
+    row = details(client, account_id=account["id"])[0]
     assert row["merchant_raw"] == "STARBUCKS"
     assert row["merchant_normalized"] == "Starbucks"
     assert row["merchant_override"] == "Keep Cafe"
@@ -206,7 +206,7 @@ def test_reclassify_category_uses_resolved_merchant(
 
     rows = {
         row["description"]: row
-        for row in client.get("/transactions", params={"account_id": account["id"]}).json()
+        for row in details(client, account_id=account["id"])
     }
     assert rows["COSTCO STORE 5"]["merchant_raw"] == "COSTCO"
     assert rows["COSTCO STORE 5"]["merchant_normalized"] == "Costco"
@@ -285,7 +285,7 @@ def test_reclassify_type_uses_merchant_scope(
 
     rows = {
         row["description"]: row
-        for row in client.get("/transactions", params={"account_id": account["id"]}).json()
+        for row in details(client, account_id=account["id"])
     }
     wu = rows["WESTERN UNION       CAPTURE 623287974331123 WEB ID: 9222993574"]
     rent = rows["Woodlake Op      RENT       270209230       WEB ID: 1861072180"]

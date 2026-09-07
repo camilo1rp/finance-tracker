@@ -18,15 +18,15 @@ Planning reference for `finance-tracker-skeleton`. Derived from source and tests
 
 | Item | Count | How derived |
 |---|---|---|
-| HTTP app endpoints | **25** | health 1 + accounts 2 + owners 2 + mappings 6 + imports 1 + transactions 3 + analytics 10. Excludes FastAPI `/docs`, `/redoc`, `/openapi.json`. [C] router tables §4 |
+| HTTP app endpoints | **27** | health 1 + accounts 2 + owners 2 + mappings 6 + imports 1 + transactions 4 + analytics 11. Excludes FastAPI `/docs`, `/redoc`, `/openapi.json`. [C] router tables §4 |
 | Tables | **9** | listed in §3. Smoke test asserts **5** of them — see §12. [C]/[T] |
-| Agent tools | **21** | 15 read-only + 2 read-with-side-effect (`find_receipts` observation-cache write, `load_proposal` graph state) + 4 non-read (`submit_plan`, `run_data_steward`, `submit_recommendation`, `run_enricher`). **0** apply tools. Same scheme as §8.3. [C] |
+| Agent tools | **24** | 18 read-only + 2 read-with-side-effect (`find_receipts` observation-cache write, `load_proposal` graph state) + 4 non-read (`submit_plan`, `run_data_steward`, `submit_recommendation`, `run_enricher`). **0** apply tools. Same scheme as §8.3. [C] |
 | Graphs in `langgraph.json` | **4** | `coordinator`, `steward`, `analyst`, `enricher` [C] |
-| Tests collected | **300** + 2 deselected | `live_gmail`, `live_gmail_rest` [T] |
+| Tests collected | **384** + 2 deselected | `live_gmail`, `live_gmail_rest` [T] |
 | CLI flags (`python -m app.agent.cli`) | **12** flags + 1 positional | §10A. There is **no** `--add-sender`. [C] |
 | Env variable names | **31** | §10 (app-consumed + SDK-only). Names only; never values. [C] |
-| Invariants | **46** | `INV-01`…`INV-46` in §9 [C] |
-| Confidence markers | **[T] 85** explicit; **[C] 47** explicit; **[D] 12**. Plus: 46 invariant rows in §9 are declared [T] as a group; unmarked rows in §3–§5 default to [C] per those section intros. | Planners treat [C] as verify-before-relying and [D] as assume-stale. |
+| Invariants | **47** | `INV-01`…`INV-47` in §9 [C] |
+| Confidence markers | **[T] 85** explicit; **[C] 47** explicit; **[D] 12**. Plus: 47 invariant rows in §9 are declared [T] as a group; unmarked rows in §3–§5 default to [C] per those section intros. | Planners treat [C] as verify-before-relying and [D] as assume-stale. |
 
 ### Versions
 
@@ -566,25 +566,27 @@ Shared analytics query params (unless noted): `date_from: date | None = None`, `
 |---|---|---|---|---|---|---|---|
 | POST | `/imports` | `account_id: int`, `allow_duplicates: bool=false` (query) | multipart `file: UploadFile` | `ImportResult` | **200** (not 201); 404 unknown account | `ingest_from_source` (`CsvSource`, `fetch_kwargs={"file_path": file.file}`) | Always creates an `ImportBatch`. `allow_duplicates=true` keeps same-identity rows (occurrence-suffixed hash). |
 
-### 4.6 `app/routers/transactions.py` (3)
+### 4.6 `app/routers/transactions.py` (4)
 
 | Method | Path | Params | Body | Response | Status | Delegates | Quirks |
 |---|---|---|---|---|---|---|---|
 | POST | `/transactions/reclassify` | `account_id=None` | — | `ReclassifyResultOut` | 200; 404 unknown account | `reclassify_transactions` | Does not re-import. Commits in service. |
-| GET | `/transactions` | `date_from`, `date_to`, `owner_id`, `category`, `merchant`, `subcategory`, `account_id` all optional | — | `list[TransactionOut]` | 200; 422 unknown category/subcategory | `resolve_label_filters` + inline select | **No** `spend_only`. **No** `date_to` default to today. `category`/`subcategory` validated via [`label_filter`](app/services/label_filter.py) (case/whitespace insensitive; AND when both set). `merchant` = **effective** value. No limit. |
-| PATCH | `/transactions/{transaction_id}` | path id | `TransactionPatch` | `TransactionOut` | 200; 404 txn or owner | inline | Only fields in `model_fields_set`. Never writes `category_raw` / `merchant_raw`. `subcategory` is PATCH-only. If `category_override` changes, deletes any `transaction_overrides` provenance row in the same transaction. Commits in router. |
+| GET | `/transactions` | same filters + `limit=25` (`ge=1`) | — | `TransactionPage` (compact cards + `match_count` / `returned` / `truncated`) | 200; 422 unknown category/subcategory | `analytics_service.list_transactions` | **No** `date_to` default. `merchant` exact unless `%`. Same service as the agent tool. |
+| GET | `/transactions/{transaction_id}` | path id | — | `TransactionOut` (triples + `raw_type` / `owner_raw` / `effective_*`) | 200; 404 | `analytics_service.get_transaction` | Detail layer. |
+| PATCH | `/transactions/{transaction_id}` | path id | `TransactionPatch` | `TransactionOut` | 200; 404 txn or owner | inline | Only fields in `model_fields_set`. Never writes `category_raw` / `merchant_raw`. `subcategory` is PATCH-only. If `category_override` changes, deletes any `transaction_overrides` provenance row in the same transaction. Commits in router. Returns the same detail shape as GET. |
 
-### 4.7 `app/routers/analytics.py` (10)
+### 4.7 `app/routers/analytics.py` (11)
 
 All except `/unmapped` go through `_apply_filters` → **`date_to` defaults to today**. Optional `transaction_type` filters list endpoints; optional `category` / `subcategory` validated then AND-filtered; aggregates always include all types in the breakdown.
 
 | Method | Path | Extra params | Response | Delegates |
 |---|---|---|---|---|
-| GET | `/analytics/summary` | required `group_by: category\|owner\|month\|account\|merchant\|subcategory`; 422 if invalid | `list[GroupSummary]` | `summarize` |
-| GET | `/analytics/by-category` | — | `list[GroupSummary]` | `summarize(..., "category")` |
-| GET | `/analytics/by-subcategory` | — | `list[GroupSummary]` | `summarize(..., "subcategory")` |
-| GET | `/analytics/by-owner` | — | `list[GroupSummary]` | `summarize(..., "owner")` |
-| GET | `/analytics/by-month` | — | `list[GroupSummary]` | `summarize(..., "month")` |
+| GET | `/analytics/summary` | required `group_by`; optional `limit` (`ge=1`) | `GroupSummaryPage` | `summarize` |
+| GET | `/analytics/by-category` | optional `limit` | `GroupSummaryPage` | `summarize(..., "category")` |
+| GET | `/analytics/by-subcategory` | optional `limit` | `GroupSummaryPage` | `summarize(..., "subcategory")` |
+| GET | `/analytics/by-owner` | optional `limit` | `GroupSummaryPage` | `summarize(..., "owner")` |
+| GET | `/analytics/by-month` | optional `limit` | `GroupSummaryPage` | `summarize(..., "month")` |
+| GET | `/analytics/values` | required `dimension: category\|subcategory\|merchant`; optional `query`, `limit=25` | `ValueListOut` | `list_values` |
 | GET | `/analytics/total` | — | `TotalOut` (`by_type`, purchases, spend, `net_cash_flow`) | `get_total` |
 | GET | `/analytics/top-merchants` | `limit: int = 10` (`ge=1`) | `list[MerchantSummary]` | `top_merchants` |
 | GET | `/analytics/largest` | `limit: int = 10` (`ge=1`) | `TransactionListOut` (`totals` + `transactions`) | `largest_transactions` |
@@ -633,7 +635,9 @@ Field lists are **[C]** (read from the Pydantic classes). Behavioral notes that 
 | `SkippedOp` | `op: MappingOp`, `reason: "duplicate" \| "missing"` | `ApplyResult.skipped` |
 | `ApplyResult` | `created_ids`, `updated_ids`, `deleted_ids`, `skipped`, `overrides_set=0`, `overrides_removed=0`, `reclass_scanned`, `reclass_updated`, `unmapped_after` | apply HTTP; steward `apply_result` |
 | `ImportResult` | `account_id`, `import_batch_id`, `total_rows_read`, `inserted`, `duplicates_skipped`, `unmapped`, `errors` | `POST /imports` |
-| `TransactionOut` | `id`, `account_id`, `transaction_date`, `description`, `amount`, `transaction_type`, `is_spend`, category triple, `subcategory`, `owner_id`, merchant triple | list/patch/largest/search tools. **Omits** `owner_raw`, `raw_type`, `dedupe_hash`, `raw`, `import_batch_id` |
+| `TransactionCard` | `id`, `account_id`, `transaction_date`, `description`, `amount`, `effective_type`, `effective_category`, `effective_merchant`, `subcategory`, `owner_id` | list/search/largest HTTP + tools |
+| `TransactionOut` | card fields + triples, `is_spend`, `raw_type`, `owner_raw` | GET/PATCH `/transactions/{id}` and `get_transaction` tool. **Omits** `dedupe_hash`, `raw`, `import_batch_id` |
+| `TransactionPage` | `transactions`, `match_count`, `returned`, `truncated` | `GET /transactions`; `list_transactions` tool |
 | `ReclassifyResultOut` | `scanned`, `updated`, `unmapped` | `POST /transactions/reclassify` |
 | `TransactionPatch` | `category_override=None`, `subcategory=None`, `owner_id=None`, `merchant_override=None`, `type_override=None` | PATCH txn |
 | `TotalsBreakdown` | `by_type`, `purchases`, `refunds`, `spend` (purchases−refunds), `net_cash_flow`, `total`, `count`, `average`, `sign_convention` | shared analytics totals |
@@ -642,7 +646,9 @@ Field lists are **[C]** (read from the Pydantic classes). Behavioral notes that 
 | `TotalOut` | `TotalsBreakdown` | get_total |
 | `MerchantSummary` | `TotalsBreakdown` + `merchant` | top_merchants |
 | `CashFlowOut` | `TotalsBreakdown` + `income`, `fees`, `transfers`, `other`, `other_count` | cash_flow |
-| `TransactionListOut` | `totals: TotalOut`, `transactions: list[TransactionOut]` | largest, search |
+| `GroupSummaryPage` | `groups`, `match_count`, `returned`, `truncated` | summarize + by-* aliases |
+| `ValueListOut` | `values: [{value, count}]`, `match_count`, `returned`, `truncated` | `GET /analytics/values`; `list_values` tool |
+| `TransactionListOut` | `totals: TotalOut`, `transactions: list[TransactionCard]`, `match_count`, `returned`, `truncated` | largest, search |
 
 **Discriminated union:** `MappingOp = Annotated[Union[CreateMappingOp, UpdateMappingOp, DeleteMappingOp, SetTransactionCategoryOp, RemoveTransactionOverrideOp], Field(discriminator="op")]`. Parser: `app/schemas.py::parse_mapping_op` (passthrough if already a model; else `TypeAdapter`). **No `rules` field and no alias** on `MappingPlanIn`.
 
@@ -912,6 +918,8 @@ All read-only; no commit.
 
 **`unmapped_summary(db) -> dict[str, list[str]]`** — distinct: UNKNOWN+raw_type; category_raw with **both** override and normalized NULL; owner_raw with owner_id NULL; merchant_raw with **both** override and normalized NULL.
 
+**`ledger_snapshot(db)`** — whole-ledger catalog for analyst turn context: `transaction_count`, distinct non-empty `effective_merchant` count, registered `owners` (`id`, `name`), and categories (effective label, row count, nested subcategories). Blank category/subcategory → `(unassigned)`. Subcategory list omitted when every row in that category is unassigned. Not a spend total; no date filter. Proven: `tests/services/test_ledger_snapshot.py`. [T]
+
 ### 7.3 `mapping_preview_service.py`
 
 **Purity of `preview_mappings(db, plan) -> MappingPreview`:** builds current + virtual merged lookups in memory; **no add/update/delete/flush/commit**. Proven: `tests/services/test_mapping_preview.py::test_preview_is_pure` (no `db.new/dirty/deleted`; row snapshot unchanged).
@@ -1165,7 +1173,7 @@ Nested graphs are **tools**, not StateGraph subgraph nodes. Interrupt still appe
 | Steward | `build_steward_builder` → `build_steward_graph` | `StewardState` | START→`steward`; conditional `_route_after_steward` → `human_approval` or END; `human_approval`/`execute` route via `Command(goto=...)` | no `proposed_ops` after steward node | CLI/tests 25 | Standalone CLI/tests: passed in. Coordinator path: `checkpointer=None` so `interrupt()` bubbles. Proven: `test_steward_standalone_compile_still_uses_checkpointer`, `test_steward_compiles_without_checkpointer_for_subagent_use` |
 | Enricher | `build_enricher_builder` → `build_enricher_graph` | `EnricherState` | START→`enricher` (`create_agent`); conditional `_route_after_enricher` → END | `submit_recommendation` (`return_direct=True`) writes `proposal_id`; outer graph always END | `run_enricher` / standalone invoke `recursion_limit=15` | **None**. Only the coordinator has a checkpointer. |
 
-`create_agent(..., name="coordinator"|"analyst"|"steward"|"enricher")`. Steward inner agent uses `state_schema=StewardState`; enricher uses `EnricherState`. Middleware: coordinator + analyst get `CurrentDateMiddleware`; **steward and enricher `create_agent` do not**.
+`create_agent(..., name="coordinator"|"analyst"|"steward"|"enricher")`. Steward inner agent uses `state_schema=StewardState`; enricher uses `EnricherState`. Middleware: coordinator gets `CurrentDateMiddleware`; analyst gets `CurrentDateMiddleware` + `LedgerSnapshotMiddleware`; **steward and enricher `create_agent` do not**.
 
 ### 8.3 Tools inventory
 
@@ -1177,16 +1185,18 @@ Classification (same scheme as §0): **read-only** = no DB write and no graph-st
 |---|---|---|---|---|
 | `list_owners` | none | select Owner → `OwnerOut` | read | `app/agent/tools/read.py::list_owners` |
 | `list_accounts` | none | select Account → `AccountOut` | read | `app/agent/tools/read.py::list_accounts` |
+| `list_values` | `dimension`, `query=None`, `limit=25`, dates, ids | `analytics_service.list_values` | read | `app/agent/tools/read.py::list_values` |
 | `get_unmapped_values` | none | `app/services/analytics_service.py::unmapped_summary` | read | `app/agent/tools/read.py::get_unmapped_values` |
-| `list_mappings` | `kind=None`, `account_id=None` | select NormalizationMapping | read | `app/agent/tools/read.py::list_mappings` |
-| `list_transactions` | `account_id`, `owner_id`, `category`, `merchant`, `subcategory`, `date_from`, `date_to`, `limit=25` | `resolve_label_filters` + inline select (not `_apply_filters`) | read | `app/agent/tools/read.py::list_transactions` |
-| `search_transactions` | `query`, `account_id`, `owner_id`, `date_from`, `date_to`, `merchant`, `category`, `subcategory`, `limit=25` | `app/services/analytics_service.py::search_transactions` | read | `app/agent/tools/read.py::search_transactions_tool` |
-| `summarize` | `group_by`, dates, `account_id`, `owner_id`, `merchant`, optional `transaction_type`, optional `category`, optional `subcategory` | `app/services/analytics_service.py::summarize` | read | `app/agent/tools/read.py::summarize` |
+| `list_mappings` | `kind=None`, `account_id=None`, `include_global=True` | `mapping_query.list_normalization_mappings` | read | `app/agent/tools/read.py::list_mappings` |
+| `list_transactions` | `account_id`, `owner_id`, `category`, `merchant`, `subcategory`, `date_from`, `date_to`, `limit=25` | `analytics_service.list_transactions` (no `date_to` default) | read | `app/agent/tools/read.py::list_transactions` |
+| `get_transaction` | `transaction_id` | `analytics_service.get_transaction` | read | `app/agent/tools/read.py::get_transaction` |
+| `search_transactions` | `query`, `account_id`, `owner_id`, `date_from`, `date_to`, `merchant`, `category`, `subcategory`, `limit=200` | `app/services/analytics_service.py::search_transactions` (loose substring across description, merchant, category, type, owner; merchant/category filters are contains) | read | `app/agent/tools/read.py::search_transactions_tool` |
+| `summarize` | `group_by`, dates, ids, `merchant`, optional `transaction_type` / `category` / `subcategory`, optional `limit` | `app/services/analytics_service.py::summarize` → `GroupSummaryPage` | read | `app/agent/tools/read.py::summarize` |
 | `get_total` | dates, ids, `merchant`, optional `transaction_type`, optional `category`, optional `subcategory` | `app/services/analytics_service.py::get_total` | read | `app/agent/tools/read.py::get_total` |
 | `top_merchants` | `limit=10`, dates, ids, `merchant`, optional `transaction_type`, optional `category`, optional `subcategory` | `app/services/analytics_service.py::top_merchants` | read | `app/agent/tools/read.py::top_merchants` |
 | `largest_transactions` | `limit=10`, dates, ids, `merchant`, optional `transaction_type`, optional `category`, optional `subcategory` | `app/services/analytics_service.py::largest_transactions` | read | `app/agent/tools/read.py::largest_transactions` |
 
-Lists: `READ_TOOLS` (first six), `ANALYTICS_TOOLS` (last four), `ANALYST_TOOLS` = owners, accounts, list_transactions, search, + analytics.
+Lists: `CATALOG_TOOLS` (owners, accounts, values); `READ_TOOLS` = catalog + unmapped/mappings/list/get/search; `ANALYTICS_TOOLS` (summarize, get_total, get_cash_flow, top_merchants, largest); `ANALYST_TOOLS` = catalog + list/get/search + analytics.
 
 **`app/agent/tools/enricher.py`** — observation-cache writes only. Email source and extractor come from `EnricherDeps` via `set_enricher_deps` / `get_enricher_deps` (`app/agent/config.py`).
 
@@ -1198,7 +1208,7 @@ Lists: `READ_TOOLS` (first six), `ANALYTICS_TOOLS` (last four), `ANALYST_TOOLS` 
 | `list_unmatched` | `merchant=None`, `date_from`, `date_to`, `limit=50` | spend txns in range with no evidence or only `unmatched` evidence | read | `app/agent/tools/enricher.py::list_unmatched` |
 | `submit_recommendation` | `recommendation: EnrichmentRecommendation`, `runtime: ToolRuntime`; `return_direct=True` | `validate_recommendation` → `store_proposal` → commit; `Command` updates `recommendation` + `proposal_id` | observation-cache write | `app/agent/tools/enricher.py::submit_recommendation` |
 
-`ENRICHER_AGENT_TOOLS` = `list_accounts`, `list_transactions`, `search_transactions` + the five enricher tools. Does **not** include `get_unmapped_values` or `list_mappings`.
+`ENRICHER_AGENT_TOOLS` = `list_accounts`, `list_values`, `list_transactions`, `get_transaction`, `search_transactions` + the five enricher tools. Does **not** include `get_unmapped_values` or `list_mappings`.
 
 **`app/agent/tools/steward.py`** — module docstring: *There is no tool that applies mappings.*
 
@@ -1218,9 +1228,9 @@ Lists: `READ_TOOLS` (first six), `ANALYTICS_TOOLS` (last four), `ANALYST_TOOLS` 
 
 Wrappers: **no DB/session before invoke**. History control: parent sees only returned string. Proven: `tests/agent/test_coordinator.py::test_coordinator_history_excludes_analyst_internals`, `tests/agent/test_analyst.py::test_analyst_two_summarize_calls_wrapper_returns_final_only`.
 
-Coordinator tools: `list_owners`, `list_accounts`, `get_total`, `summarize`, `ask_analyst`, `run_data_steward`, `run_enricher`.
+Coordinator tools: `list_owners`, `list_accounts`, `list_values`, `get_total`, `get_cash_flow`, `summarize`, `ask_analyst`, `run_data_steward`, `run_enricher`.
 
-**Counts:** 21 tools; 15 read-only; 2 read-with-side-effect (`find_receipts`, `load_proposal`); 4 non-read (`submit_plan` gate, `run_data_steward` delegate, `submit_recommendation` observation-cache, `run_enricher` delegate). **0 apply tools.** The coordinator never relays op lists; it passes a proposal id in the steward task string.
+**Counts:** 24 tools; 18 read-only; 2 read-with-side-effect (`find_receipts`, `load_proposal`); 4 non-read (`submit_plan` gate, `run_data_steward` delegate, `submit_recommendation` observation-cache, `run_enricher` delegate). **0 apply tools.** The coordinator never relays op lists; it passes a proposal id in the steward task string.
 
 Every tool that hits the DB uses `app/agent/config.py::tool_session` (open/close per call).
 
@@ -1445,10 +1455,14 @@ You are the conversational entrypoint for a personal finance ledger.
 Resolve people and account names to ids (list_owners, list_accounts) and relative dates such as "last month" to concrete YYYY-MM-DD ranges *before* delegating. Put those ids and dates in the task text; subagents do not see this conversation.
 A current calendar date is attached to each turn; use it to resolve relative dates. Never guess the calendar. Do not treat that date as something the user said or confirmed.
 
-Answer total questions with get_total (`spend` = purchases − refunds; `net_cash_flow`). Use summarize or get_cash_flow when those fit better.
-Delegate multi-step analysis (comparisons, trends, top merchants, unusual transactions, description search) to ask_analyst.
+You can answer closed data questions yourself: a total, cash flow, or a summary when the user already named a specific label you have resolved. Those tools read stored labels as-is. list_values can confirm a spelling; it is not a search of the ledger.
+Category and subcategory are independent labels on the same row and can overlap. A name may live on either axis — check both catalogs. Both filters AND; do not add those two summaries. Ambiguous which-label → ask_analyst. Subcategory is not a steward mapping kind.
+
+Stored categories, merchants, and types are not always correct or complete. If the question is open — insights, patterns, discovery, things that might be split or mislabeled, or inconsistencies — do not answer from a single catalog or total. Delegate to ask_analyst. If a catalog or summary is truncated, that is not a complete answer; tighten the query or delegate.
+
+Answer "how much did I spend" with get_total. Type SPEND means purchases, not net spending. Lead with `spend` (purchases − refunds) and `net_cash_flow` (income + refunds − purchases − fees). Then mention purchases and refunds. Do not call the SPEND bucket "total spend". Transfers and adjustments are not spending or cash-flow net. sign_convention is import convention, not the sign of returned amounts. summarize, get_cash_flow, and analyst list wrappers use the same field meanings.
 Delegate anything touching mappings, unmapped values, or overrides to run_data_steward.
-When delegating mapping work, include any account, kind (type, category, owner, or merchant), or merchant scope the user asked for in the task text.
+When delegating mapping work, include any account, kind (type, category, owner, or merchant), or merchant scope the user asked for in the task text. If the user asks for contains/starts-with/wildcard matching, say so in the steward task (patterns use `%` as a wildcard; no `%` is exact).
 
 Never fabricate numbers. If the steward pauses for approval, tell the user what is pending.
 When relaying steward outcomes, repeat the steward's created_ids, updated_ids, deleted_ids, and reclass_updated exactly; never paraphrase counts into vague success claims.
@@ -1459,13 +1473,33 @@ Questions about what a purchase was, or requests to enrich or research transacti
 **Analyst** — `app/agent/analyst.py::ANALYST_PROMPT`
 
 ```
-You answer analysis questions over a personal transaction ledger.
-Comparisons take multiple tool calls (two summarize calls with different date ranges, or one group_by=month); compute deltas yourself.
-Report only numbers that appear in tool results — never estimate.
-State the filters you used (dates, owner, account) in the answer.
-Amounts are decimal strings.
+You answer analysis questions over a personal transaction ledger. Your job is insights and discovery, not only a labeled total. Stored categories, merchants, and types can be wrong or split.
+Category and subcategory are independent labels on the same row and can overlap. A name may live on either axis. Both filters AND; do not add those two summaries.
+
+Row lists and catalogs can be truncated. If truncated is true and the page does not satisfy the question, call again with a tighter query or filter. Do not claim you covered the whole ledger unless the tool results actually do. search_transactions totals cover all matches even when the row list is truncated.
+
+search_transactions is a loose substring search across description, merchant, category, type, and owner fields (default limit 200). One call is one fragment. First fragments are stems from stored payee and label text. Hits are seeds: take distinctive stems from the returned description/merchant and search those too.
+
+Comparisons take multiple tool calls; compute deltas yourself. Report only numbers that appear in tool results. State the filters you used. Amounts are decimal strings.
 The task text should already contain resolved owner/account ids and concrete YYYY-MM-DD ranges; use list_owners/list_accounts only to confirm.
 A current calendar date is attached to each turn; use it if a task still uses relative dates. Do not treat that date as something the user said or confirmed.
+A ledger snapshot (owners, categories with their subcategories, transaction count, merchant count) is attached to each turn. It is the whole ledger, not the task's date range, and not a spend total. Use it for spellings and scale. Stored labels can be wrong or incomplete; tool results still win for amounts.
+
+Guidelines for common asks — pick tools to fit; these are not a fixed sequence:
+
+- Discovery (subscriptions, "what might I be paying"): start from stored payee and label text. The attached snapshot already lists category/subcategory families; list_values on merchant (or a filtered slice) when you need counts or spellings beyond that. Search distinctive stems from description and merchant, including beyond a labeled category and the first catalog page. Hits are seeds: pull new stems from those cards and search those until a pass adds no new families. English words from the question are a later slice, after payee and label searches. Prefer a payee stem over a short prefix that matches many unrelated rows. list_values sorts by count, so one-off suffixes drop off — prefer search for those. Report what you found and which slices stayed truncated or unsearched.
+
+- Recurring / duplicates: match on search cards, then search again with a stem from the suspected group to pull aliases. Recurring: same or near amount on a regular interval, including when merchant strings differ or the category is off. Duplicate: same or near amount, same or adjacent date, similar payee — often two accounts. Treat a funding transfer of a card charge as the same debt. Treat a refund of the same amount as a reversal. If truncated, tighten query or merchant/category contains-filters before treating the match set as complete.
+
+- Spend on X: X may be a category, a subcategory, a merchant family, or text on the row. A labeled total is enough only when that label looks complete. If the total is thin, the spelling is unknown, or the same store has many merchant strings, search loosely or use merchant with `%`.
+
+- Compare / trend: two date windows or group_by=month with the same other filters; compute deltas from the tool results.
+
+- Mix / where did money go: summarize or top_merchants. A truncated top-N is not the full mix. Transfers and card-funding can look like spend — check by_type.
+
+- Inconsistencies: look for the same payee under different categories or types. Use get_transaction when a row's labels look off. Report the inconsistency; do not invent mappings.
+
+- Largest / unusual: start from largest_transactions or a filtered search, then inspect rows. Do not call something unusual without the transactions.
 ```
 
 **Enricher** — `app/agent/enricher_graph.py::ENRICHER_SYSTEM_PROMPT`
@@ -1515,7 +1549,9 @@ When the task references a proposal id, call load_proposal first, preview the op
 **Middleware fragments** — `app/agent/middleware.py`
 
 - `DATE_CONTEXT_PREFIX = "Current date:"`
+- `LEDGER_CONTEXT_PREFIX = "Ledger snapshot:"`
 - `format_current_date(today) -> f"Current date: {today.isoformat()} ({today.strftime('%A')})."`
+- `format_ledger_snapshot(snapshot) ->` compact catalog: transaction count, distinct merchant count, `id=name` owners, categories with counts and nested subcategories. `(unassigned)` omitted as a subcategory when it is the only child.
 
 Reject HumanMessage from execute (verbatim content): `"Plan rejected. Nothing was applied. Propose a different plan if needed."`
 
@@ -1578,7 +1614,9 @@ CLI (`app/agent/cli.py::_decision`): `reject*` → `{"decision":"reject","ops":[
 
 ### 8.7 Middleware
 
-`app/agent/middleware.py::CurrentDateMiddleware` — prefixes **last HumanMessage** of **this model call** with `format_current_date(clock())` + blank line (or a leading text block for list content). Skips if already prefixed. Does **not** change `system_message` or earlier humans. Attached on coordinator and analyst `create_agent(..., middleware=[CurrentDateMiddleware()])`. Proven: `tests/agent/test_middleware.py::*`. Coordinator prompt contains no ISO date: `test_coordinator_prompt_has_no_interpolated_date`. [T]
+`app/agent/middleware.py::CurrentDateMiddleware` — prefixes **last HumanMessage** of **this model call** with `format_current_date(clock())` + blank line (or a leading text block for list content). Skips if already prefixed. Does **not** change `system_message` or earlier humans. Attached on coordinator and analyst. Proven: `tests/agent/test_middleware.py::*`. Coordinator prompt contains no ISO date: `test_coordinator_prompt_has_no_interpolated_date`. [T]
+
+`app/agent/middleware.py::LedgerSnapshotMiddleware` — same injection point; analyst-only (`build_analyst(..., middleware=[CurrentDateMiddleware(), LedgerSnapshotMiddleware()])`). Loader defaults to `analytics_service.ledger_snapshot` via `tool_session`. Inserts after the date line when date is already present. Skips if `Ledger snapshot:` already appears. Snapshot is the **whole ledger** (not the task window): owners, categories with subcategories and row counts, transaction count, distinct merchant count. Not a spend total. Proven: `test_ledger_middleware_prefixes_last_human_and_leaves_system_untouched`, `test_date_then_ledger_inserts_snapshot_after_date`, `test_analyst_model_sees_ledger_snapshot`, `tests/services/test_ledger_snapshot.py`. [T]
 
 **Not covered here:** LangGraph `create_agent` internals; provider token streaming.
 
@@ -1697,14 +1735,14 @@ Internals of `enrich_transaction` [T] `tests/enrichment/test_enrichment_service.
 | | Coordinator | Analyst | Steward | Enricher |
 |---|---|---|---|---|
 | Builder | `build_coordinator` | `build_analyst` | `build_steward_graph` | `build_enricher_graph` |
-| Can read | `list_owners`, `list_accounts`, `get_total`, `summarize`; plus whatever subagents return as **text** | `ANALYST_TOOLS`: owners, accounts, `list_transactions`, `search_transactions`, summarize, get_total, top_merchants, largest | `READ_TOOLS` + preview + `load_proposal` | `list_accounts`, `list_transactions`, `search_transactions`, `email_source_status`, `get_evidence`, `list_unmatched`; mailbox **only** via `find_receipts` |
+| Can read | `list_owners`, `list_accounts`, `list_values`, `get_total`, `get_cash_flow`, `summarize`; plus whatever subagents return as **text** | `ANALYST_TOOLS`: catalog, list/get/search, summarize, get_total, get_cash_flow, top_merchants, largest | `READ_TOOLS` + preview + `load_proposal` | `list_accounts`, `list_values`, `list_transactions`, `get_transaction`, `search_transactions`, `email_source_status`, `get_evidence`, `list_unmatched`; mailbox **only** via `find_receipts` |
 | Can write | nothing directly; `run_data_steward` may apply **after** interrupt; `run_enricher` writes observation cache | **nothing** | graph state via `submit_plan`; DB only in `execute` via `apply_mapping_plan` (+ `mark_consumed`) | `transaction_evidence` / `merchant_senders` via `find_receipts`; `enrichment_proposals` via `submit_recommendation` |
 | Cannot | see subagent internals; pass op lists to steward; search mailbox itself | write; see mappings (`get_unmapped_values` / `list_mappings` are steward-only among those) | apply via a tool; hold a DB session across interrupt | issue an arbitrary mailbox query; fetch by id; see message bodies or line-item descriptions; write `Transaction` / mappings / `transaction_overrides`; expand task scope |
-| Scope in | user chat + date middleware | **task string only** | **task string only** (ids/dates/proposal id must be in it) | **task string only** |
+| Scope in | user chat + date middleware | task string + date and ledger snapshot middleware | **task string only** (ids/dates/proposal id must be in it) | **task string only** |
 | Ends | model stops calling tools | same | no `proposed_ops` after steward node, or after wrap-up | exactly one `submit_recommendation` then END |
 | Recursion | CLI 25 | inherit if passed; wrappers pass none | CLI/tests 25 | invoke 15 (`run_enricher` and `--enricher`) |
 | Checkpointer | **required** on CLI; Studio `None` (server injects) | **None** | CLI: passed; nested under coordinator: `None` so interrupt bubbles | **None** |
-| Middleware | `CurrentDateMiddleware` | `CurrentDateMiddleware` | **none** | **none** |
+| Middleware | `CurrentDateMiddleware` | `CurrentDateMiddleware` + `LedgerSnapshotMiddleware` | **none** | **none** |
 | Model env | `STEWARD_MODEL` | `STEWARD_MODEL` | `STEWARD_MODEL` | `ENRICHER_MODEL` or fallback `STEWARD_MODEL` |
 
 Which agent can search the mailbox? **Only the enricher**, and only by passing **transaction ids** to `find_receipts` (1–25). The search query is built in `plan_candidate_search` from that transaction's merchant/senders/window — the model cannot supply a Gmail `q`. [T] tool description + `test_enricher_writes_no_effective_values`
@@ -1744,6 +1782,7 @@ Stable id `INV-nn` is the citation key. Every row below is **[T]** (named test e
 | INV-16 | The enricher graph ends after exactly one `submit_recommendation`. | No extra model turn | routing + `return_direct` | `test_scripted_enricher_happy_path` |
 | INV-17 | Coordinator prompt has no interpolated calendar date. | Prompt cache | `COORDINATOR_PROMPT` + middleware | `test_coordinator_prompt_has_no_interpolated_date` |
 | INV-18 | Date middleware does not rewrite system prompt or prior humans. | Cache + history | `CurrentDateMiddleware._with_date` | `test_wrap_model_call_prefixes_last_human_and_leaves_system_untouched` |
+| INV-47 | Ledger snapshot middleware does not rewrite system prompt or prior humans; analyst-only; date still first when both run. | Cache + history | `LedgerSnapshotMiddleware._with_ledger` | `test_ledger_middleware_prefixes_last_human_and_leaves_system_untouched`, `test_date_then_ledger_inserts_snapshot_after_date` |
 
 ### Data semantics
 
@@ -2050,12 +2089,12 @@ Verified against code:
 
 1. **`DELETE /mappings/{id}` returns 200 + reclass counts**, not 204. Same for PATCH. Wired through `apply_mapping_plan`. Proven: `test_list_and_delete_mapping`, `test_patch_and_delete_reclassify`.
 2. **`POST /mappings` does not reclassify.** After create-via-HTTP you still `POST /transactions/reclassify` (QA.md is right). Plan/apply/patch/delete do reclassify.
-3. **`search_transactions` shares `_apply_filters`** → `date_to` defaults to today. Agent `list_transactions` does **not** share that helper (no date_to default). HTTP `GET /transactions` also has no date_to default.
+3. **`search_transactions` shares `_apply_filters`** → `date_to` defaults to today. `list_transactions` uses the same helper with `default_date_to=False`. HTTP `GET /transactions` matches.
 4. **Analytics filters by merchant, not category.** Category questions: `summarize(group_by="category")` or HTTP `GET /transactions?category=` (exact effective match).
 5. **Mapping plans use `ops` only.** No `rules` alias on `MappingPlanIn`.
 6. **`langgraph-supervisor` is absent** — not in requirements, not imported. Coordinator is a `create_agent` with two delegate tools, not a supervisor package.
 7. **`AccountOut` omits `default_mapping`** — agents cannot see column maps via `list_accounts`.
-8. **`TransactionOut` omits `owner_raw` / `raw_type`** — unmapped worklist is `get_unmapped_values`, not list_transactions.
+8. **List cards omit triples / `raw_type` / `owner_raw`** — use `GET /transactions/{id}` or `get_transaction`. Unmapped worklist is still `get_unmapped_values`.
 9. **Import HTTP is 200, not 201.** ImportBatch created even when `inserted=0`.
 10. **Unique constraint with NULLs is not the real uniqueness guarantee** for global rules; app-layer identity is.
 11. **Steward has no `CurrentDateMiddleware`** — dates must arrive in the task string from the coordinator.
