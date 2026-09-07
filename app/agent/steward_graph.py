@@ -59,9 +59,28 @@ def human_approval(state: StewardState) -> Command[Literal["steward", "execute"]
     # Close the session before interrupt() — this node restarts on resume and the
     # graph may sit paused for hours.
     preview = _recompute_preview(submitted, account_scope)
+
+    # Persist the recomputed preview as a mapping_preview artifact
+    preview_artifact_id = None
+    try:
+        from app.services import artifact_service
+        with tool_session() as db:
+            preview_artifact_id, _ = artifact_service.persist_artifact(
+                db,
+                thread_id="steward",
+                kind="mapping_preview",
+                title=f"Mapping preview ({len(submitted)} ops)",
+                spec={"ops": submitted, "account_id": account_scope},
+                result=preview,
+                produced_by="steward",
+            )
+    except Exception:
+        pass
+
     payload = {
         "ops": submitted,
         "preview": preview,
+        "preview_artifact_id": preview_artifact_id,
         "rationale": state.get("rationale"),
     }
     decision = interrupt(payload)

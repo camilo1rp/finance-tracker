@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from typing import Literal
+from typing import Any, Literal
 
-from langchain.tools import tool
+from langchain.tools import ToolRuntime, tool
+from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 from sqlalchemy import select
 
 from app.agent.config import tool_session
 from app.domain.label_filter import UnknownLabelFilterError
-from app.models import Account, Owner
+from app.models import Account, AnalysisArtifact, Owner
 from app.schemas import (
     AccountOut,
     CashFlowOut,
@@ -24,9 +26,10 @@ from app.schemas import (
     TransactionPage,
     ValueListOut,
 )
-from app.services import analytics_service
+from app.services import analytics_service, artifact_service
 from app.services.analytics_service import unmapped_summary
 from app.services.mapping_query import list_normalization_mappings
+from app.services.toon import encode_toon
 
 GroupBy = Literal["category", "owner", "month", "account", "merchant", "subcategory"]
 ValueDimension = Literal["category", "subcategory", "merchant"]
@@ -58,6 +61,109 @@ def _label_filter_error(exc: UnknownLabelFilterError) -> str:
     return json.dumps({"error": exc.detail})
 
 
+_COLLECTION_KEYS = ("transactions", "groups", "merchants", "values", "lines")
+_MAX_OFFLOAD_UNWRAP_DEPTH = 8
+
+
+def unwrap_offloaded_payload(data: Any, *, depth: int = 0) -> Any:
+    """Unwrap large_tool_output {raw: ...} blobs, including nested JSON escapes."""
+    if depth > _MAX_OFFLOAD_UNWRAP_DEPTH:
+        return data
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return data
+    if any(key in data and isinstance(data[key], list) for key in _COLLECTION_KEYS):
+        return data
+    raw = data.get("raw")
+    if not isinstance(raw, str):
+        return data
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"lines": raw.splitlines()}
+    if isinstance(parsed, dict):
+        return unwrap_offloaded_payload(parsed, depth=depth + 1)
+    if isinstance(parsed, list):
+        return {"values": parsed}
+    return parsed
+
+
+def slice_artifact_payload(
+    data: Any,
+    *,
+    artifact_id: int,
+    kind: str,
+    offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    """Return a bounded slice of a materialized artifact payload."""
+    if isinstance(data, list):
+        return {
+            "artifact_id": artifact_id,
+            "kind": kind,
+            "offset": offset,
+            "limit": limit,
+            "total": len(data),
+            "values": data[offset : offset + limit],
+        }
+    if not isinstance(data, dict):
+        return {"artifact_id": artifact_id, "kind": kind, "value": data}
+    for key in _COLLECTION_KEYS:
+        rows = data.get(key)
+        if isinstance(rows, list):
+            return {
+                "artifact_id": artifact_id,
+                "kind": kind,
+                "offset": offset,
+                "limit": limit,
+                "total": len(rows),
+                key: rows[offset : offset + limit],
+            }
+    payload = {"artifact_id": artifact_id, "kind": kind}
+    payload.update(data)
+    return payload
+
+
+def _extract_runtime_meta(runtime: ToolRuntime | None) -> tuple[str, str | None]:
+    thread_id = "standalone"
+    run_id = None
+    if runtime and hasattr(runtime, "config") and isinstance(runtime.config, dict):
+        cfg = runtime.config
+        run_id = cfg.get("run_id")
+        configurable = cfg.get("configurable")
+        if isinstance(configurable, dict) and configurable.get("thread_id"):
+            thread_id = str(configurable["thread_id"])
+        elif cfg.get("metadata") and isinstance(cfg["metadata"], dict) and cfg["metadata"].get("thread_id"):
+            thread_id = str(cfg["metadata"]["thread_id"])
+    return thread_id, run_id
+
+
+def _emit_artifact_ui_event(
+    artifact_id: int,
+    kind: str,
+    component: str,
+    digest: str,
+) -> None:
+    try:
+        from langgraph.graph.ui import push_ui_message
+
+        push_ui_message(
+            name=component,
+            props={
+                "type": "artifact_ref",
+                "artifact_id": artifact_id,
+                "kind": kind,
+                "component": component,
+                "digest": {"text": digest},
+                "fetch": f"/artifacts/{artifact_id}/rows",
+            },
+            state_key="ui",
+        )
+    except Exception:
+        pass
+
+
 @tool
 def list_owners() -> str:
     """List registered owners (id and name)."""
@@ -74,16 +180,17 @@ def list_accounts() -> str:
         return _dump([AccountOut.model_validate(row) for row in rows])
 
 
-@tool
+@tool("list_values", response_format="content_and_artifact")
 def list_values(
     dimension: ValueDimension,
+    runtime: ToolRuntime,
     query: str | None = None,
     limit: int = 25,
     date_from: str | None = None,
     date_to: str | None = None,
     account_id: int | None = None,
     owner_id: int | None = None,
-) -> str:
+) -> tuple[str, dict[str, Any] | None]:
     """Catalog of distinct effective labels with counts.
 
     dimension is category, subcategory, or merchant. query is a case-insensitive
@@ -91,7 +198,8 @@ def list_values(
     the stored spelling is unknown. limit must be >= 1.
     """
     if err := _limit_error(limit):
-        return err
+        return err, None
+    thread_id, run_id = _extract_runtime_meta(runtime)
     with tool_session() as db:
         payload = analytics_service.list_values(
             db,
@@ -103,7 +211,30 @@ def list_values(
             account_id=account_id,
             owner_id=owner_id,
         )
-        return ValueListOut.model_validate(payload).model_dump_json()
+        spec = {
+            "tool": "list_values",
+            "kwargs": {
+                "dimension": dimension,
+                "query": query,
+                "limit": limit,
+                "date_from": date_from,
+                "date_to": date_to,
+                "account_id": account_id,
+                "owner_id": owner_id,
+            },
+        }
+        art_id, digest = artifact_service.persist_artifact(
+            db,
+            thread_id=thread_id,
+            run_id=run_id,
+            kind="value_list",
+            title=f"Values: {dimension}",
+            spec=spec,
+            result=payload,
+            produced_by="analyst",
+        )
+        _emit_artifact_ui_event(art_id, "value_list", "grouped_table", digest)
+        return digest, {"artifact_id": art_id, "kind": "value_list", "component": "grouped_table"}
 
 
 @tool
@@ -132,8 +263,9 @@ def list_mappings(
         return _dump([NormalizationMappingOut.model_validate(row) for row in rows])
 
 
-@tool
+@tool("list_transactions", response_format="content_and_artifact")
 def list_transactions(
+    runtime: ToolRuntime,
     account_id: int | None = None,
     owner_id: int | None = None,
     category: str | None = None,
@@ -141,8 +273,8 @@ def list_transactions(
     subcategory: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
-    limit: int = 25,
-) -> str:
+    limit: int = 50,
+) -> tuple[str, dict[str, Any] | None]:
     """List compact transaction cards (effective labels, no raw/override triples).
 
     Does not default date_to. merchant is exact unless it contains `%`.
@@ -151,7 +283,8 @@ def list_transactions(
     triples / raw_type / owner_raw. limit must be >= 1.
     """
     if err := _limit_error(limit):
-        return err
+        return err, None
+    thread_id, run_id = _extract_runtime_meta(runtime)
     with tool_session() as db:
         try:
             payload = analytics_service.list_transactions(
@@ -166,8 +299,32 @@ def list_transactions(
                 limit=limit,
             )
         except UnknownLabelFilterError as exc:
-            return _label_filter_error(exc)
-        return TransactionPage.model_validate(payload).model_dump_json()
+            return _label_filter_error(exc), None
+        spec = {
+            "tool": "list_transactions",
+            "kwargs": {
+                "account_id": account_id,
+                "owner_id": owner_id,
+                "category": category,
+                "merchant": merchant,
+                "subcategory": subcategory,
+                "date_from": date_from,
+                "date_to": date_to,
+                "limit": limit,
+            },
+        }
+        art_id, digest = artifact_service.persist_artifact(
+            db,
+            thread_id=thread_id,
+            run_id=run_id,
+            kind="transaction_list",
+            title="Transaction list",
+            spec=spec,
+            result=payload,
+            produced_by="analyst",
+        )
+        _emit_artifact_ui_event(art_id, "transaction_list", "transaction_list", digest)
+        return digest, {"artifact_id": art_id, "kind": "transaction_list", "component": "transaction_list"}
 
 
 @tool
@@ -180,9 +337,10 @@ def get_transaction(transaction_id: int) -> str:
         return TransactionOut.model_validate(row).model_dump_json()
 
 
-@tool("search_transactions")
+@tool("search_transactions", response_format="content_and_artifact")
 def search_transactions_tool(
     query: str,
+    runtime: ToolRuntime,
     account_id: int | None = None,
     owner_id: int | None = None,
     date_from: str | None = None,
@@ -191,7 +349,7 @@ def search_transactions_tool(
     category: str | None = None,
     subcategory: str | None = None,
     limit: int = 200,
-) -> str:
+) -> tuple[str, dict[str, Any] | None]:
     """Search payee and label fields (case-insensitive substring).
 
     query matches description, merchant (raw/normalized/override/effective),
@@ -202,7 +360,8 @@ def search_transactions_tool(
     limit is 200; limit >= 1.
     """
     if err := _limit_error(limit):
-        return err
+        return err, None
+    thread_id, run_id = _extract_runtime_meta(runtime)
     with tool_session() as db:
         try:
             payload = analytics_service.search_transactions(
@@ -218,13 +377,39 @@ def search_transactions_tool(
                 subcategory=subcategory,
             )
         except UnknownLabelFilterError as exc:
-            return _label_filter_error(exc)
-        return TransactionListOut.model_validate(payload).model_dump_json()
+            return _label_filter_error(exc), None
+        spec = {
+            "tool": "search_transactions",
+            "kwargs": {
+                "query": query,
+                "account_id": account_id,
+                "owner_id": owner_id,
+                "date_from": date_from,
+                "date_to": date_to,
+                "merchant": merchant,
+                "category": category,
+                "subcategory": subcategory,
+                "limit": limit,
+            },
+        }
+        art_id, digest = artifact_service.persist_artifact(
+            db,
+            thread_id=thread_id,
+            run_id=run_id,
+            kind="transaction_list",
+            title=f"Search: {query}",
+            spec=spec,
+            result=payload,
+            produced_by="analyst",
+        )
+        _emit_artifact_ui_event(art_id, "transaction_list", "transaction_list", digest)
+        return digest, {"artifact_id": art_id, "kind": "transaction_list", "component": "transaction_list"}
 
 
-@tool
+@tool("summarize", response_format="content_and_artifact")
 def summarize(
     group_by: GroupBy,
+    runtime: ToolRuntime,
     date_from: str | None = None,
     date_to: str | None = None,
     account_id: int | None = None,
@@ -234,7 +419,7 @@ def summarize(
     category: str | None = None,
     subcategory: str | None = None,
     limit: int | None = None,
-) -> str:
+) -> tuple[str, dict[str, Any] | None]:
     """Group transaction totals with the same breakdown as get_total per bucket.
 
     Returns {groups, match_count, returned, truncated}. group_by is category,
@@ -244,7 +429,8 @@ def summarize(
     is exact unless it contains `%`.
     """
     if err := _optional_limit_error(limit):
-        return err
+        return err, None
+    thread_id, run_id = _extract_runtime_meta(runtime)
     with tool_session() as db:
         try:
             payload = analytics_service.summarize(
@@ -261,12 +447,40 @@ def summarize(
                 limit=limit,
             )
         except UnknownLabelFilterError as exc:
-            return _label_filter_error(exc)
-        return GroupSummaryPage.model_validate(payload).model_dump_json()
+            return _label_filter_error(exc), None
+        comp = "timeseries" if group_by == "month" else "grouped_table"
+        spec = {
+            "tool": "summarize",
+            "kwargs": {
+                "group_by": group_by,
+                "date_from": date_from,
+                "date_to": date_to,
+                "account_id": account_id,
+                "owner_id": owner_id,
+                "merchant": merchant,
+                "transaction_type": transaction_type,
+                "category": category,
+                "subcategory": subcategory,
+                "limit": limit,
+            },
+        }
+        art_id, digest = artifact_service.persist_artifact(
+            db,
+            thread_id=thread_id,
+            run_id=run_id,
+            kind="group_summary",
+            title=f"Summary by {group_by}",
+            spec=spec,
+            result=payload,
+            produced_by="analyst",
+        )
+        _emit_artifact_ui_event(art_id, "group_summary", comp, digest)
+        return digest, {"artifact_id": art_id, "kind": "group_summary", "component": comp}
 
 
-@tool
+@tool("get_total", response_format="content_and_artifact")
 def get_total(
+    runtime: ToolRuntime,
     date_from: str | None = None,
     date_to: str | None = None,
     account_id: int | None = None,
@@ -275,7 +489,7 @@ def get_total(
     transaction_type: str | None = None,
     category: str | None = None,
     subcategory: str | None = None,
-) -> str:
+) -> tuple[str, dict[str, Any] | None]:
     """Return per-type magnitudes, net spending, and net cash flow.
 
     Type SPEND means purchases/charges, not household spending.
@@ -288,6 +502,7 @@ def get_total(
     date_to defaults to today. merchant is exact unless it contains `%`.
     Amounts are positive magnitudes except net_cash_flow, which can be negative.
     """
+    thread_id, run_id = _extract_runtime_meta(runtime)
     with tool_session() as db:
         try:
             row = analytics_service.get_total(
@@ -302,12 +517,37 @@ def get_total(
                 subcategory=subcategory,
             )
         except UnknownLabelFilterError as exc:
-            return _label_filter_error(exc)
-        return TotalOut.model_validate(row).model_dump_json()
+            return _label_filter_error(exc), None
+        spec = {
+            "tool": "get_total",
+            "kwargs": {
+                "date_from": date_from,
+                "date_to": date_to,
+                "account_id": account_id,
+                "owner_id": owner_id,
+                "merchant": merchant,
+                "transaction_type": transaction_type,
+                "category": category,
+                "subcategory": subcategory,
+            },
+        }
+        art_id, digest = artifact_service.persist_artifact(
+            db,
+            thread_id=thread_id,
+            run_id=run_id,
+            kind="total",
+            title="Totals breakdown",
+            spec=spec,
+            result=row,
+            produced_by="analyst",
+        )
+        _emit_artifact_ui_event(art_id, "total", "kpi_row", digest)
+        return digest, {"artifact_id": art_id, "kind": "total", "component": "kpi_row"}
 
 
-@tool
+@tool("top_merchants", response_format="content_and_artifact")
 def top_merchants(
+    runtime: ToolRuntime,
     limit: int = 10,
     date_from: str | None = None,
     date_to: str | None = None,
@@ -317,7 +557,7 @@ def top_merchants(
     transaction_type: str | None = None,
     category: str | None = None,
     subcategory: str | None = None,
-) -> str:
+) -> tuple[str, dict[str, Any] | None]:
     """Top merchants by net spend (purchases − refunds) with get_total breakdown.
 
     Each row includes the same fields as get_total plus merchant.
@@ -325,7 +565,8 @@ def top_merchants(
     contains `%`. limit must be >= 1.
     """
     if err := _limit_error(limit):
-        return err
+        return err, None
+    thread_id, run_id = _extract_runtime_meta(runtime)
     with tool_session() as db:
         try:
             rows = analytics_service.top_merchants(
@@ -341,12 +582,38 @@ def top_merchants(
                 subcategory=subcategory,
             )
         except UnknownLabelFilterError as exc:
-            return _label_filter_error(exc)
-        return _dump([MerchantSummary.model_validate(row) for row in rows])
+            return _label_filter_error(exc), None
+        spec = {
+            "tool": "top_merchants",
+            "kwargs": {
+                "limit": limit,
+                "date_from": date_from,
+                "date_to": date_to,
+                "account_id": account_id,
+                "owner_id": owner_id,
+                "merchant": merchant,
+                "transaction_type": transaction_type,
+                "category": category,
+                "subcategory": subcategory,
+            },
+        }
+        art_id, digest = artifact_service.persist_artifact(
+            db,
+            thread_id=thread_id,
+            run_id=run_id,
+            kind="group_summary",
+            title="Top merchants",
+            spec=spec,
+            result={"merchants": rows, "match_count": len(rows), "returned": len(rows), "truncated": False},
+            produced_by="analyst",
+        )
+        _emit_artifact_ui_event(art_id, "group_summary", "bar", digest)
+        return digest, {"artifact_id": art_id, "kind": "group_summary", "component": "bar"}
 
 
-@tool
+@tool("largest_transactions", response_format="content_and_artifact")
 def largest_transactions(
+    runtime: ToolRuntime,
     limit: int = 10,
     date_from: str | None = None,
     date_to: str | None = None,
@@ -356,7 +623,7 @@ def largest_transactions(
     transaction_type: str | None = None,
     category: str | None = None,
     subcategory: str | None = None,
-) -> str:
+) -> tuple[str, dict[str, Any] | None]:
     """Largest transactions by absolute amount with filter-scoped totals.
 
     Returns {totals, transactions, match_count, returned, truncated}.
@@ -365,7 +632,8 @@ def largest_transactions(
     use get_transaction for triples. limit must be >= 1.
     """
     if err := _limit_error(limit):
-        return err
+        return err, None
+    thread_id, run_id = _extract_runtime_meta(runtime)
     with tool_session() as db:
         try:
             payload = analytics_service.largest_transactions(
@@ -381,12 +649,38 @@ def largest_transactions(
                 subcategory=subcategory,
             )
         except UnknownLabelFilterError as exc:
-            return _label_filter_error(exc)
-        return TransactionListOut.model_validate(payload).model_dump_json()
+            return _label_filter_error(exc), None
+        spec = {
+            "tool": "largest_transactions",
+            "kwargs": {
+                "limit": limit,
+                "date_from": date_from,
+                "date_to": date_to,
+                "account_id": account_id,
+                "owner_id": owner_id,
+                "merchant": merchant,
+                "transaction_type": transaction_type,
+                "category": category,
+                "subcategory": subcategory,
+            },
+        }
+        art_id, digest = artifact_service.persist_artifact(
+            db,
+            thread_id=thread_id,
+            run_id=run_id,
+            kind="transaction_list",
+            title="Largest transactions",
+            spec=spec,
+            result=payload,
+            produced_by="analyst",
+        )
+        _emit_artifact_ui_event(art_id, "transaction_list", "transaction_list", digest)
+        return digest, {"artifact_id": art_id, "kind": "transaction_list", "component": "transaction_list"}
 
 
-@tool
+@tool("get_cash_flow", response_format="content_and_artifact")
 def get_cash_flow(
+    runtime: ToolRuntime,
     date_from: str | None = None,
     date_to: str | None = None,
     account_id: int | None = None,
@@ -394,7 +688,7 @@ def get_cash_flow(
     merchant: str | None = None,
     category: str | None = None,
     subcategory: str | None = None,
-) -> str:
+) -> tuple[str, dict[str, Any] | None]:
     """Household cash-flow with the same core totals as get_total plus extras.
 
     Includes by_type, purchases, refunds, spend (purchases − refunds),
@@ -404,6 +698,7 @@ def get_cash_flow(
     overridden — prefer account_id for a single-account view.
     merchant is exact unless it contains `%`.
     """
+    thread_id, run_id = _extract_runtime_meta(runtime)
     with tool_session() as db:
         try:
             row = analytics_service.cash_flow(
@@ -417,8 +712,90 @@ def get_cash_flow(
                 subcategory=subcategory,
             )
         except UnknownLabelFilterError as exc:
-            return _label_filter_error(exc)
-        return CashFlowOut.model_validate(row).model_dump_json()
+            return _label_filter_error(exc), None
+        spec = {
+            "tool": "get_cash_flow",
+            "kwargs": {
+                "date_from": date_from,
+                "date_to": date_to,
+                "account_id": account_id,
+                "owner_id": owner_id,
+                "merchant": merchant,
+                "category": category,
+                "subcategory": subcategory,
+            },
+        }
+        art_id, digest = artifact_service.persist_artifact(
+            db,
+            thread_id=thread_id,
+            run_id=run_id,
+            kind="total",
+            title="Cash flow summary",
+            spec=spec,
+            result=row,
+            produced_by="analyst",
+        )
+        _emit_artifact_ui_event(art_id, "total", "kpi_row", digest)
+        return digest, {"artifact_id": art_id, "kind": "total", "component": "kpi_row"}
+
+
+@tool("open_artifact")
+def open_artifact(
+    artifact_id: int,
+    runtime: ToolRuntime,
+    limit: int = 20,
+    offset: int = 0,
+) -> str:
+    """Retrieve a bounded TOON slice of an existing artifact by ID.
+
+    Use this just-in-time retrieval tool when you need to inspect raw transaction
+    rows or group records from a previous analysis result. Opening a
+    large_tool_output artifact returns a sliced subset of the stored payload.
+    """
+    if limit < 1 or limit > 50:
+        limit = 20
+    if offset < 0:
+        offset = 0
+    with tool_session() as db:
+        artifact = db.get(AnalysisArtifact, artifact_id)
+        if artifact is None:
+            return encode_toon({"error": f"artifact {artifact_id} not found"})
+        data = unwrap_offloaded_payload(artifact_service.materialize_artifact(db, artifact))
+        payload = slice_artifact_payload(
+            data,
+            artifact_id=artifact_id,
+            kind=artifact.kind,
+            offset=offset,
+            limit=limit,
+        )
+        return encode_toon(payload)
+
+
+@tool("submit_analysis", return_direct=True)
+def submit_analysis(
+    artifact_ids: list[int],
+    narrative: str,
+    runtime: ToolRuntime,
+) -> Command:
+    """Submit the final analysis findings and finish the analyst turn.
+
+    Takes a list of referenced artifact_ids and a concise narrative summary (<= 600 characters).
+    This is the analyst's only finish.
+    """
+    ids_str = ", ".join(str(i) for i in artifact_ids)
+    summary_text = f"artifacts: [{ids_str}]. {narrative}".strip()
+    return Command(
+        update={
+            "artifact_ids": artifact_ids,
+            "narrative": narrative,
+            "messages": [
+                ToolMessage(
+                    content=summary_text,
+                    tool_call_id=runtime.tool_call_id or "",
+                )
+            ],
+        }
+    )
 
 
 CATALOG_TOOLS = [
@@ -449,5 +826,7 @@ ANALYST_TOOLS = [
     list_transactions,
     get_transaction,
     search_transactions_tool,
+    open_artifact,
+    submit_analysis,
     *ANALYTICS_TOOLS,
 ]

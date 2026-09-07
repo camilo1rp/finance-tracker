@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.agent.analyst import ANALYST_PROMPT, build_analyst
 from app.agent.middleware import LEDGER_CONTEXT_PREFIX
 from app.models import Account, Owner, Transaction
+from langchain.agents.middleware.summarization import count_tokens_approximately
 from tests.agent.helpers import ScriptedChatModel, agent_sessions, seed_coffee
 
 
@@ -152,7 +153,10 @@ def test_analyst_two_summarize_calls_wrapper_returns_final_only(
     assert wrapped == final
     for message in tool_messages:
         assert message.content != wrapped
-        assert "group_value" in message.content
+        assert "Artifact #" in message.content
+        assert "kind=group_summary" in message.content
+        assert message.artifact is not None
+        assert "artifact_id" in message.artifact
 
 
 def test_analyst_model_sees_ledger_snapshot(
@@ -205,3 +209,246 @@ def test_analyst_model_sees_ledger_snapshot(
     assert "- Dining (1): Coffee (1)" in text
     assert "- Food & Drink (1)" in text
     assert text.endswith("what categories exist?")
+
+
+def test_baseline_token_benchmarks_u2_u4_u10(
+    db_session: Session, agent_sessions
+) -> None:
+    seed_coffee(db_session)
+    owner = db_session.scalars(select(Owner)).one()
+    account = db_session.scalars(select(Account)).one()
+    for i in range(1, 11):
+        _add_spend(
+            db_session,
+            account,
+            day=date(2024, 7, i),
+            description=f"STREAMING SUBSCRIPTION {i}",
+            amount="14.99",
+            category="Subscriptions",
+            owner_id=owner.id,
+        )
+    db_session.commit()
+
+    # Journey U2: Category breakdown ("Where did my money go in Q2?")
+    u2_model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "summarize",
+                        "args": {
+                            "group_by": "category",
+                            "date_from": "2024-07-01",
+                            "date_to": "2024-07-31",
+                            "owner_id": owner.id,
+                        },
+                        "id": "sum-u2",
+                    }
+                ],
+            ),
+            AIMessage(content="You spent money on Subscriptions and Dining in July."),
+        ]
+    )
+    analyst_u2 = build_analyst(model=u2_model)
+    res_u2 = analyst_u2.invoke(
+        {"messages": [{"role": "user", "content": "Where did my money go in July?"}]}
+    )
+    tokens_u2 = count_tokens_approximately(res_u2["messages"])
+    assert tokens_u2 > 0
+
+    # Journey U4: Subscription discovery (Iterative search_transactions)
+    u4_model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_transactions",
+                        "args": {"query": "streaming"},
+                        "id": "search-1",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_transactions",
+                        "args": {"query": "subscription"},
+                        "id": "search-2",
+                    }
+                ],
+            ),
+            AIMessage(content="Found 10 recurring subscriptions."),
+        ]
+    )
+    analyst_u4 = build_analyst(model=u4_model)
+    res_u4 = analyst_u4.invoke(
+        {"messages": [{"role": "user", "content": "Find my subscriptions."}]}
+    )
+    tokens_u4 = count_tokens_approximately(res_u4["messages"])
+    assert tokens_u4 > tokens_u2
+
+    # Journey U10: Multi-turn coordinator thread accumulation baseline
+    coord_messages = [
+        HumanMessage(content="What did I spend?"),
+        AIMessage(content="You spent 149.90"),
+        HumanMessage(content="Show details"),
+        AIMessage(content="Details here"),
+        HumanMessage(content="And last month?"),
+        AIMessage(content="Zero last month"),
+    ]
+    tokens_u10 = count_tokens_approximately(coord_messages)
+    assert tokens_u10 > 0
+
+
+def test_analyst_submit_analysis_updates_state_and_thread_id(
+    db_session: Session, agent_sessions
+) -> None:
+    seed_coffee(db_session)
+    owner = db_session.scalars(select(Owner)).one()
+
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "summarize",
+                        "args": {"group_by": "category", "owner_id": owner.id},
+                        "id": "call-sum",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "submit_analysis",
+                        "args": {
+                            "artifact_ids": [1],
+                            "narrative": "Coffee is the dominant spend.",
+                        },
+                        "id": "call-submit",
+                    }
+                ],
+            ),
+        ]
+    )
+    analyst = build_analyst(model=model)
+    res = analyst.invoke(
+        {"messages": [{"role": "user", "content": "Analyze my spend"}]},
+        config={"configurable": {"thread_id": "thread-analysis-1"}},
+    )
+    assert res.get("artifact_ids") == [1]
+    assert res.get("narrative") == "Coffee is the dominant spend."
+    last_msg = res["messages"][-1]
+    assert last_msg.type == "tool"
+    assert "artifacts: [1]. Coffee is the dominant spend." in last_msg.content
+
+
+def test_analyst_emits_custom_ui_event_stream(
+    db_session: Session, agent_sessions
+) -> None:
+    seed_coffee(db_session)
+    owner = db_session.scalars(select(Owner)).one()
+
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "summarize",
+                        "args": {"group_by": "category", "owner_id": owner.id},
+                        "id": "c1",
+                    }
+                ],
+            ),
+            AIMessage(content="Finished"),
+        ]
+    )
+    analyst = build_analyst(model=model)
+    events = []
+    for mode, chunk in analyst.stream(
+        {"messages": [{"role": "user", "content": "summarize category"}]},
+        stream_mode=["custom"],
+    ):
+        if mode == "custom":
+            events.append(chunk)
+
+    assert len(events) >= 1
+    ui_event = events[0]
+    assert ui_event["type"] == "ui"
+    assert ui_event["name"] == "grouped_table"
+    props = ui_event["props"]
+    assert props["type"] == "artifact_ref"
+    assert props["component"] == "grouped_table"
+    assert props["kind"] == "group_summary"
+    assert "artifact_id" in props
+    assert props["fetch"] == f"/artifacts/{props['artifact_id']}/rows"
+
+
+def test_open_artifact_unwraps_large_tool_output_without_double_escape(
+    db_session: Session, agent_sessions
+) -> None:
+    import json
+
+    from app.agent.tools.read import open_artifact
+    from app.services import artifact_service
+
+    inner = {
+        "transactions": [
+            {"id": 1, "description": "COFFEE", "amount": "-4.50"},
+            {"id": 2, "description": "TEA", "amount": "-3.00"},
+            {"id": 3, "description": "SHOP, MAIN", "amount": "-10.00"},
+        ]
+    }
+    nested_raw = json.dumps({"raw": json.dumps(inner)})
+    art_id, _ = artifact_service.persist_artifact(
+        db_session,
+        thread_id="thread-open-1",
+        kind="large_tool_output",
+        title="Offloaded open_artifact output",
+        spec={"tool": "open_artifact", "kwargs": {"artifact_id": 3, "limit": 31}},
+        result={"raw": nested_raw},
+        produced_by="analyst",
+    )
+    text = open_artifact.func(art_id, None, 2, 0)
+    assert "\\\\" not in text
+    assert "transactions[2]{id,description,amount}:" in text
+    assert "COFFEE" in text
+    assert "TEA" in text
+    assert "SHOP" not in text
+    assert "total: 3" in text
+    assert "kind: large_tool_output" in text
+
+
+def test_open_artifact_slices_non_json_large_tool_output(
+    db_session: Session, agent_sessions
+) -> None:
+    from app.agent.tools.read import open_artifact
+    from app.services import artifact_service
+
+    raw = "line-one\nline-two\nline-three\nline-four"
+    art_id, _ = artifact_service.persist_artifact(
+        db_session,
+        thread_id="thread-open-2",
+        kind="large_tool_output",
+        title="Offloaded text",
+        spec={"tool": "search_transactions", "kwargs": {"query": "x"}},
+        result={"raw": raw},
+        produced_by="analyst",
+    )
+    text = open_artifact.func(art_id, None, 2, 1)
+    assert "\\\\" not in text
+    assert "line-two" in text
+    assert "line-three" in text
+    assert "line-one" not in text
+    assert "line-four" not in text
+    assert "total: 4" in text
+
+
+
+

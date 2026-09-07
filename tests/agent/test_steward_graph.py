@@ -1,6 +1,7 @@
 import pytest
 from langchain_core.messages import AIMessage
 from langgraph.types import Command
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.config import in_memory_checkpointer
@@ -67,8 +68,16 @@ def test_steward_interrupt_flow(
     assert interrupts, f"expected interrupt, got keys {result.keys()}"
     payload = interrupts[0].value
     assert payload["preview"] is not None
+    assert payload["preview_artifact_id"] is not None
     assert payload["rationale"] == "map remaining categories"
     assert len(payload["ops"]) == 2
+
+    # Verify persisted preview artifact
+    from app.models import AnalysisArtifact
+
+    preview_art = db_session.get(AnalysisArtifact, payload["preview_artifact_id"])
+    assert preview_art is not None
+    assert preview_art.kind == "mapping_preview"
 
     subset = [payload["ops"][0]]
     resumed = graph.invoke(
@@ -104,3 +113,23 @@ def test_steward_compiles_without_checkpointer_for_subagent_use() -> None:
     assert graph.checkpointer is None
     nested = build_steward_graph(model=model, checkpointer=None)
     assert nested.checkpointer is None
+
+
+def test_preview_mapping_rules_tool_is_pure_inv_35(db_session: Session, agent_sessions) -> None:
+    from app.agent.tools.steward import preview_mapping_rules
+    from app.models import AnalysisArtifact
+
+    initial_count = len(list(db_session.scalars(select(AnalysisArtifact)).all()))
+    ops = [
+        {
+            "op": "create",
+            "kind": "category",
+            "raw_value": "PureTest",
+            "canonical_value": "Dining",
+        }
+    ]
+    res_str = preview_mapping_rules.func(ops=ops)
+    assert "would_change" in res_str
+    after_count = len(list(db_session.scalars(select(AnalysisArtifact)).all()))
+    assert after_count == initial_count  # INV-35: Pure preview does not write artifacts
+

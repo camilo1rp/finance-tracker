@@ -1,7 +1,7 @@
 """Subagents wrapped as tools. History control lives in the wrapper, not the graph."""
 from __future__ import annotations
 
-from langchain.tools import tool
+from langchain.tools import ToolRuntime, tool
 
 
 def _last_text(result: dict) -> str:
@@ -71,8 +71,25 @@ def make_subagent_tools(*, analyst, steward, enricher):
             "the question is open, not only as a last resort."
         ),
     )
-    def ask_analyst(task: str) -> str:
-        result = analyst.invoke({"messages": [{"role": "user", "content": task}]})
+    def ask_analyst(task: str, runtime: ToolRuntime) -> str:
+        thread_id = "standalone"
+        if runtime and hasattr(runtime, "config") and isinstance(runtime.config, dict):
+            cfg = runtime.config
+            configurable = cfg.get("configurable")
+            if isinstance(configurable, dict) and configurable.get("thread_id"):
+                thread_id = str(configurable["thread_id"])
+            elif cfg.get("metadata") and isinstance(cfg["metadata"], dict) and cfg["metadata"].get("thread_id"):
+                thread_id = str(cfg["metadata"]["thread_id"])
+
+        result = analyst.invoke(
+            {"messages": [{"role": "user", "content": task}]},
+            config={"configurable": {"thread_id": thread_id}},
+        )
+        artifact_ids = result.get("artifact_ids")
+        narrative = result.get("narrative")
+        if artifact_ids is not None and narrative is not None:
+            ids_str = ", ".join(str(i) for i in artifact_ids)
+            return f"artifacts: [{ids_str}]. {narrative}".strip()
         return _last_text(result)
 
     @tool(

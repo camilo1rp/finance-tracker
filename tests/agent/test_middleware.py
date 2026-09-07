@@ -10,11 +10,14 @@ from app.agent.coordinator import COORDINATOR_PROMPT
 from app.agent.middleware import (
     DATE_CONTEXT_PREFIX,
     LEDGER_CONTEXT_PREFIX,
+    ArtifactOffloadMiddleware,
     CurrentDateMiddleware,
     LedgerSnapshotMiddleware,
     format_current_date,
     format_ledger_snapshot,
 )
+from langchain.agents.middleware import ModelRequest, ModelResponse, ToolCallRequest
+from tests.agent.helpers import agent_sessions
 
 
 def _request(*messages, system: str = "frozen") -> ModelRequest:
@@ -223,3 +226,70 @@ def test_analyst_prompt_mentions_attached_snapshot() -> None:
     assert re.search(r"\d{4}-\d{2}-\d{2}", ANALYST_PROMPT) is None
     assert "ledger snapshot" in ANALYST_PROMPT.lower()
     assert "current calendar date" in ANALYST_PROMPT.lower()
+
+
+def test_artifact_offload_middleware_under_threshold() -> None:
+    mw = ArtifactOffloadMiddleware(max_tokens=100)
+    req = ToolCallRequest(
+        tool_call={"name": "test_tool", "args": {"a": 1}, "id": "tc1"},
+        tool=None,
+        state={},
+        runtime=None,
+    )
+    msg = ToolMessage(content="short content", tool_call_id="tc1")
+    res = mw.wrap_tool_call(req, lambda r: msg)
+    assert res == msg
+
+
+def test_artifact_offload_middleware_over_threshold(db_session, agent_sessions) -> None:
+    mw = ArtifactOffloadMiddleware(max_tokens=20)
+    req = ToolCallRequest(
+        tool_call={"name": "test_tool", "args": {"query": "long"}, "id": "tc1"},
+        tool=None,
+        state={},
+        runtime=None,
+    )
+    long_content = "word " * 100
+    msg = ToolMessage(content=long_content, tool_call_id="tc1")
+    res = mw.wrap_tool_call(req, lambda r: msg)
+    assert isinstance(res, ToolMessage)
+    assert "Output offloaded" in res.content
+    assert res.artifact is not None
+    assert res.artifact.get("offloaded") is True
+    art_id = res.artifact["artifact_id"]
+    from app.models import AnalysisArtifact
+
+    stored = db_session.get(AnalysisArtifact, art_id)
+    assert stored is not None
+    assert stored.kind == "large_tool_output"
+
+
+def test_artifact_offload_middleware_exempts_open_artifact(db_session, agent_sessions) -> None:
+    mw = ArtifactOffloadMiddleware(max_tokens=20)
+    req = ToolCallRequest(
+        tool_call={"name": "open_artifact", "args": {"artifact_id": 1}, "id": "tc1"},
+        tool=None,
+        state={},
+        runtime=None,
+    )
+    long_content = "word " * 100
+    msg = ToolMessage(content=long_content, tool_call_id="tc1")
+    res = mw.wrap_tool_call(req, lambda r: msg)
+    assert res is msg
+    assert "Output offloaded" not in res.content
+
+
+def test_artifact_offload_middleware_exempts_submit_analysis(db_session, agent_sessions) -> None:
+    mw = ArtifactOffloadMiddleware(max_tokens=20)
+    req = ToolCallRequest(
+        tool_call={"name": "submit_analysis", "args": {"artifact_ids": [1], "narrative": "ok"}, "id": "tc1"},
+        tool=None,
+        state={},
+        runtime=None,
+    )
+    long_content = "word " * 100
+    msg = ToolMessage(content=long_content, tool_call_id="tc1")
+    res = mw.wrap_tool_call(req, lambda r: msg)
+    assert res is msg
+    assert "Output offloaded" not in res.content
+

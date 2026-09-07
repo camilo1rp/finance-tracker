@@ -5,8 +5,17 @@ from collections.abc import Awaitable, Callable
 from datetime import date
 from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
-from langchain_core.messages import HumanMessage
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    ClearToolUsesEdit,
+    ContextEditingMiddleware,
+    ModelRequest,
+    ModelResponse,
+    ToolCallRequest,
+)
+from langchain.agents.middleware.summarization import count_tokens_approximately
+from langchain_core.messages import HumanMessage, ToolMessage
+from langgraph.types import Command
 
 DATE_CONTEXT_PREFIX = "Current date:"
 LEDGER_CONTEXT_PREFIX = "Ledger snapshot:"
@@ -190,3 +199,79 @@ class LedgerSnapshotMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
         return await handler(self._with_ledger(request))
+
+
+OFFLOAD_EXEMPT_TOOLS = frozenset({"open_artifact", "submit_analysis"})
+
+
+class ArtifactOffloadMiddleware(AgentMiddleware):
+    """Intercept tool execution: if tool output content exceeds token threshold, offload to artifact store."""
+
+    def __init__(self, max_tokens: int = 2000) -> None:
+        super().__init__()
+        self.max_tokens = max_tokens
+
+    def _maybe_offload(
+        self,
+        request: ToolCallRequest,
+        response: ToolMessage | Command[Any],
+    ) -> ToolMessage | Command[Any]:
+        if not isinstance(response, ToolMessage):
+            return response
+
+        tool_call = request.tool_call or {}
+        tool_name = tool_call.get("name", "tool")
+        if tool_name in OFFLOAD_EXEMPT_TOOLS:
+            return response
+
+        approx_tokens = count_tokens_approximately([response])
+        if approx_tokens <= self.max_tokens:
+            return response
+
+        from app.agent.config import tool_session
+        from app.services import artifact_service
+
+        tool_args = tool_call.get("args", {})
+        thread_id = "standalone"
+        if request.runtime and hasattr(request.runtime, "config") and isinstance(request.runtime.config, dict):
+            configurable = request.runtime.config.get("configurable") or {}
+            if isinstance(configurable, dict) and configurable.get("thread_id"):
+                thread_id = str(configurable["thread_id"])
+
+        content_str = str(response.content or "")
+        with tool_session() as db:
+            art_id, digest = artifact_service.persist_artifact(
+                db,
+                thread_id=thread_id,
+                kind="large_tool_output",
+                title=f"Offloaded {tool_name} output ({approx_tokens} tokens)",
+                spec={"tool": tool_name, "kwargs": tool_args},
+                result={"raw": content_str},
+                produced_by="analyst",
+            )
+
+        new_content = (
+            f"{digest}\n\n[Output offloaded ({approx_tokens} tokens > {self.max_tokens} limit). "
+            f"Artifact #{art_id} stored. Use open_artifact(artifact_id={art_id}) to inspect subsets.]"
+        )
+        return ToolMessage(
+            content=new_content,
+            tool_call_id=response.tool_call_id,
+            artifact={"artifact_id": art_id, "kind": "large_tool_output", "offloaded": True},
+            status=response.status,
+        )
+
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage | Command[Any]],
+    ) -> ToolMessage | Command[Any]:
+        return self._maybe_offload(request, handler(request))
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
+    ) -> ToolMessage | Command[Any]:
+        return self._maybe_offload(request, await handler(request))
+

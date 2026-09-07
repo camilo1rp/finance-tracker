@@ -6,23 +6,23 @@ Planning reference for `finance-tracker-skeleton`. Derived from source and tests
 
 | Field | Value |
 |---|---|
-| Generated | 2026-09-04 |
+| Generated | 2026-09-07 |
 | Branch | `main` |
-| HEAD SHA | `4769fa9` |
+| HEAD SHA | `b9de344` (working tree: artifact store + analyst offload-loop fix) |
 | Enrichment range | **13** commits `265803b`…`28dd469` (enrichment A through live-run lessons), plus closeout `4769fa9` |
 | Python (venv, as of generation) | 3.14.5. **Studio requires ≥3.11 and &lt;3.14** — do not plan Studio against this venv; use Dockerfile 3.12 or a 3.11–3.13 venv. [D] Studio pin from LangGraph CLI docs / `langgraph.json` comment in prior map; Dockerfile is [C] `python:3.12-slim`. |
 | Dockerfile base | `python:3.12-slim` [C] |
-| Tests | **326 passed**, 2 deselected (`live_gmail`, `live_gmail_rest`) |
+| Tests | **414 passed**, 2 deselected (`live_gmail`, `live_gmail_rest`) |
 
 ### Reconciled counts
 
 | Item | Count | How derived |
 |---|---|---|
-| HTTP app endpoints | **27** | health 1 + accounts 2 + owners 2 + mappings 6 + imports 1 + transactions 4 + analytics 11. Excludes FastAPI `/docs`, `/redoc`, `/openapi.json`. [C] router tables §4 |
-| Tables | **9** | listed in §3. Smoke test asserts **5** of them — see §12. [C]/[T] |
-| Agent tools | **24** | 18 read-only + 2 read-with-side-effect (`find_receipts` observation-cache write, `load_proposal` graph state) + 4 non-read (`submit_plan`, `run_data_steward`, `submit_recommendation`, `run_enricher`). **0** apply tools. Same scheme as §8.3. [C] |
+| HTTP app endpoints | **32** | health 1 + accounts 2 + owners 2 + mappings 6 + imports 1 + transactions 4 + analytics 11 + artifacts 5. Excludes FastAPI `/docs`, `/redoc`, `/openapi.json`. [C] router tables §4 |
+| Tables | **10** | listed in §3. Smoke test asserts **5** of them (does not assert enrichment or `analysis_artifacts`) — see §12. [C]/[T] |
+| Agent tools | **26** | 15 in `read.py` (including `open_artifact`, `submit_analysis`) + 5 enricher + 3 steward + 3 subagent wrappers. Artifact-producing reads persist `analysis_artifacts` (not ledger writes). `submit_analysis` is graph-state finish. **0** apply tools. Same scheme as §8.3. [C] |
 | Graphs in `langgraph.json` | **4** | `coordinator`, `steward`, `analyst`, `enricher` [C] |
-| Tests collected | **384** + 2 deselected | `live_gmail`, `live_gmail_rest` [T] |
+| Tests collected | **414** + 2 deselected | `live_gmail`, `live_gmail_rest` [T] |
 | CLI flags (`python -m app.agent.cli`) | **12** flags + 1 positional | §10A. There is **no** `--add-sender`. [C] |
 | Env variable names | **31** | §10 (app-consumed + SDK-only). Names only; never values. [C] |
 | Invariants | **47** | `INV-01`…`INV-47` in §9 [C] |
@@ -71,7 +71,7 @@ This document is a **decision instrument**. Every section should let a planner d
 
 What this document deliberately does **not** cover is listed in **§15**. A section that states its own limits is better than one that is silent.
 
-`tests/enrichment/test_model_extractor.py::test_extraction_prompt_is_verbatim_in_project_map` **reads this file** and asserts `EXTRACTION_SYSTEM_PROMPT` is present byte-for-byte. Do not drop or paraphrase that prompt block. The sibling `tests/agent/test_enricher.py::test_enricher_prompt_is_verbatim_in_project_map` does the same for `ENRICHER_SYSTEM_PROMPT`. [T]
+`tests/enrichment/test_model_extractor.py::test_extraction_prompt_is_verbatim_in_project_map` **reads this file** and asserts `EXTRACTION_SYSTEM_PROMPT` is present byte-for-byte. Do not drop or paraphrase that prompt block. The sibling `tests/agent/test_enricher.py::test_enricher_prompt_is_verbatim_in_project_map` does the same for `ENRICHER_SYSTEM_PROMPT`. `tests/agent/test_analyst.py::test_analyst_prompt_is_verbatim_in_project_map` does the same for `ANALYST_PROMPT`. [T]
 
 | § | Decide here |
 |---|---|
@@ -117,7 +117,7 @@ How a planner navigates this document: resolve a real question to a section.
 | Which agent can search the mailbox, and with what constraints? | Enricher only, via `find_receipts(transaction_ids)` (1–25). The model cannot supply a Gmail `q`. | §8C |
 | If `effective_category` needed to consult another table, which code paths change? | `analytics_service`, `GET /transactions` filters, `list_transactions` / `list_unmatched`. No test asserts the SQL text. | §13A first row, §3.6 |
 | What happens between a user typing "approve" and a row being updated, and where can it fail? | CLI `_decision` → resume → `human_approval` → `execute` → `apply_mapping_plan` (commit) → `mark_consumed` (second commit). Conflict = nothing written; reclassify exception = rollback; crash between commits = plan applied, proposal `open`. | §8B.2, §8.5, §11A |
-| Which claims are not backed by a test? | Anything marked [C] or [D]; §9 is the [T] set. Examples: `discarded` never written [C]; Studio Python pin [D]; 7-day Testing-status refresh tokens [D]. | [C]/[D] markers; §9 |
+| Which claims are not backed by a test? | Anything marked [C] or [D]; §9 is the [T] set. Examples: Studio Python pin [D]; 7-day Testing-status refresh tokens [D]. | [C]/[D] markers; §9 |
 
 When a new question cannot be resolved to a section this way, that is a gap in the document, not in the reader — add the section or a 'Not covered here' line.
 
@@ -154,7 +154,8 @@ Each term is defined by a symbol. ≤ 2 lines.
 | Identity (of a mapping) | `(kind, cleaned raw_value, account_id, merchant)`. Same identity + same canonical = duplicate; different canonical = conflict. | `app/services/mapping_preview_service.py::find_mapping_by_identity` |
 | Conflict vs duplicate | Duplicate: identity exists, same canonical → apply skips. Conflict: identity exists, different canonical → apply rejects whole plan. Override replace_conflict is a different check. | `preview_mappings` / `_override_conflict_errors` |
 | Plan / op / preview / apply | A `MappingPlanIn` is an `ops` list. Preview is pure. Apply writes in one transaction then reclassifies. | `app/schemas.py::MappingPlanIn`; §7.3 |
-| Interrupt / resume / decision | Steward pauses at `human_approval` with `{ops, preview, rationale}`. Resume `{decision, ops?}`. `approve` applies; anything else rejects. CLI `edit` is approve+subset. | `app/agent/steward_graph.py::human_approval`; §8.5 |
+| Interrupt / resume / decision | Steward pauses at `human_approval` with `{ops, preview, preview_artifact_id, rationale}`. Resume `{decision, ops?}`. `approve` applies; anything else rejects. CLI `edit` is approve+subset. | `app/agent/steward_graph.py::human_approval`; §8.5 |
+| Analysis artifact | Addressable query result: spec + digest + optional row cache in `analysis_artifacts`. The UI/fetch path uses the id; the model sees the digest (or a TOON slice via `open_artifact`). | `app/models.py::AnalysisArtifact`; `app/services/artifact_service.py` |
 | Evidence | A `transaction_evidence` row: structured `ReceiptExtraction` JSON, never a body. | `app/models.py::TransactionEvidence` |
 | Match kind | How a receipt scored against a transaction: `exact_total` / `split_partial` / `date_only` / `unmatched`. | `app/domain/receipts.py::MatchKind` |
 | Proposal | Observation-cache row (`enrichment_proposals`). Status `open` or `consumed`. Handoff to steward is by **id**, not ops. | `app/models.py::EnrichmentProposal` |
@@ -179,14 +180,14 @@ One line per directory; files only when the purpose is not obvious from the name
 | `app/integrations/gmail_common/` | Shared Gmail query/text/auth/HTTP-status mapping |
 | `app/integrations/gmail_mcp/` | MCP adapter (`EMAIL_PROVIDER=gmail`) |
 | `app/integrations/gmail_rest/` | REST adapter (`EMAIL_PROVIDER=gmail_rest`, primary) |
-| `app/services/` | Ingest, analytics, mapping preview/apply, enrichment, proposals |
-| `app/routers/` | HTTP. Commit is the callee's job |
+| `app/services/` | Ingest, analytics, mapping preview/apply, enrichment, proposals, analysis artifacts, TOON encoder |
+| `app/routers/` | HTTP. Commit is the callee's job. Includes `/artifacts`. |
 | `app/agent/` | Four graphs, CLI, Studio factories, tools |
 | `scripts/` | `verify_api.py`; live Gmail spikes (redact before disk) |
 | `docs/email-enrichment/` | Gap report, setup, spikes, live-run lessons (§16) |
 | `tests/` | SQLite + scripted models; `gmail_mcp/` and `gmail_rest/` have colliding basenames → importlib mode |
 
-Non-obvious files: `app/database.py` (create_all + additive ALTERs, no Alembic); `app/models.py` (`effective_category` / `effective_merchant` SQL expressions); `app/agent/cli.py` (coordinator REPL + `--enrich` / `--steward` / `--enricher`); `langgraph.json` (four Studio graphs); `pytest.ini` deselects `live_gmail` and `live_gmail_rest`.
+Non-obvious files: `app/database.py` (create_all + additive ALTERs, no Alembic); `app/models.py` (`effective_category` / `effective_merchant` SQL expressions; `AnalysisArtifact`); `app/services/artifact_service.py` (persist / materialize / derive); `app/services/toon.py` (encode-only TOON); `app/agent/cli.py` (coordinator REPL + `--enrich` / `--steward` / `--enricher`); `langgraph.json` (four Studio graphs); `pytest.ini` deselects `live_gmail` and `live_gmail_rest`.
 
 `STRUCTURE.md` is stale (omits `merchant.py`, `middleware.py`, `schemas.py`, `tools/__init__.py`, `scripts/`). Listed STRUCTURE paths exist. Its checkpointer note is right for nested steward and wrong for analyst (tool `invoke`, not subgraph inheritance) — see §8.
 
@@ -196,7 +197,7 @@ Non-obvious files: `app/database.py` (create_all + additive ALTERs, no Alembic);
 
 ## 3. Data model
 
-Nine tables. No Alembic; `app/database.py::init_db` runs `Base.metadata.create_all` then additive ALTERs. Unmarked schema claims in this section are **[C]**. Named tests are **[T]**.
+Ten tables. No Alembic; `app/database.py::init_db` runs `Base.metadata.create_all` then additive ALTERs. Unmarked schema claims in this section are **[C]**. Named tests are **[T]**.
 
 ### 3.1 `owners` — `app/models.py::Owner`
 
@@ -395,7 +396,30 @@ No FK to transactions: a proposal may reference several. Written by `submit_reco
 | consumed_plan_ref | String | yes | set by `mark_consumed` in execute (`execute:<proposal_id>`) |
 | created_at | DateTime | no | UTC-now default |
 
-### 3.11 Enums (verbatim value sets)
+### 3.11 `analysis_artifacts` — `app/models.py::AnalysisArtifact`
+
+Durable store for analytics results. Written by artifact-producing read tools, `ArtifactOffloadMiddleware` (`kind=large_tool_output`), and steward `human_approval` (`kind=mapping_preview`). Proven: `tests/services/test_artifact_service.py`, `tests/routers/test_artifacts.py`. [T]
+
+| Column | Type | Null | Notes |
+|---|---|---|---|
+| id | Integer PK | no | |
+| thread_id | String, indexed | no | default `"standalone"`; parent coordinator thread id when `ask_analyst` forwards config |
+| run_id | String | yes | LangGraph run id when present |
+| produced_by | String | no | `analyst`, `coordinator`, `steward`, `enricher`, `user` |
+| kind | String | no | `group_summary`, `transaction_list`, `total`, `value_list`, `mapping_preview`, `large_tool_output`, `comparison` |
+| title | String(80) | no | |
+| spec | JSON | no | `{tool, kwargs}` for re-execution; offload stores the tool name + args that produced the blob |
+| digest | JSON | no | `{text, kind, title, artifact_id?}` — model-visible summary, ≤300 tokens (`MAX_DIGEST_TOKENS`) |
+| cache | JSON | yes | materialized rows / `{raw: str}` for offloaded tool output |
+| cache_as_of | DateTime | yes | |
+| derived_from | Integer FK → `analysis_artifacts.id` | yes | parent for `derive_artifact` |
+| status | String | no | default `open`; `superseded`, `expired` |
+| created_at | DateTime | no | UTC-now naive default |
+| expires_at | DateTime | yes | cleanup marks `expired` when past |
+
+`app/services/artifact_service.py`: `persist_artifact`, `format_digest` (INV-53: `match_count` / `truncated` / filters), `materialize_artifact` (cache hit unless `force_refresh` / paging), `derive_artifact` (mutate spec, re-run `execute_spec`), `cleanup_expired_artifacts_and_proposals`. `execute_spec` does **not** know `open_artifact`; opening a `large_tool_output` uses cache + `unwrap_offloaded_payload`. [C]
+
+### 3.12 Enums (verbatim value sets)
 
 `app/domain/classification.py::TransactionType`: `SPEND`, `INCOME`, `TRANSFER`, `REFUND`, `FEE`, `ADJUSTMENT`, `UNKNOWN`. Legacy `PAYMENT` remains in the enum for migrated rows only; resolver never emits it; HTTP mapping create rejects `PAYMENT` (422).
 
@@ -407,9 +431,9 @@ No FK to transactions: a proposal may reference several. Written by `submit_reco
 
 `app/schemas.py::MappingKind`: same four strings as `NormalizationKind`.
 
-`app/models.py::ProposalStatus`: `open`, `consumed`, `discarded`. **`discarded` is declared, never written.** [C] writers are `store_proposal` (`open`) and `mark_consumed` (`consumed` only); grep of the repo finds no assignment of `DISCARDED` / `"discarded"`.
+`app/models.py::ProposalStatus`: `open`, `consumed`, `discarded`. Writers: `store_proposal` (`open`), `mark_consumed` (`consumed`), `cleanup_expired_artifacts_and_proposals` (`discarded` for open proposals past TTL). Proven: `tests/services/test_artifact_service.py::test_cleanup_expired_artifacts_and_proposals`. [T]
 
-### 3.12 Cleaning
+### 3.13 Cleaning
 
 `app/domain/classification.py::clean_raw_value` — `raw_value.strip().lower()`.
 
@@ -419,7 +443,7 @@ Applied at read: `classify_transaction_type` (raw + merchant), `classify_categor
 
 Not cleaned: `category_raw` / `owner_raw` / `raw_type` / `description` as stored on transactions (stripped only). Merchant extraction collapses whitespace (`extract_merchant` / merchant_col `" ".join(str.split())`).
 
-### 3.13 ER
+### 3.14 ER
 
 ```mermaid
 erDiagram
@@ -439,6 +463,19 @@ erDiagram
         string consumed_plan_ref
         datetime created_at
     }
+    AnalysisArtifact {
+        int id PK
+        string thread_id
+        string kind
+        string title
+        json spec
+        json digest
+        json cache
+        int derived_from FK
+        string status
+    }
+
+    AnalysisArtifact ||--o{ AnalysisArtifact : derived_from
 
     Owner {
         int id PK
@@ -598,6 +635,18 @@ All except `/unmapped` go through `_apply_filters` → **`date_to` defaults to t
 
 **Not covered here:** OpenAPI generated schemas; request examples.
 
+### 4.8 `app/routers/artifacts.py` (5)
+
+| Method | Path | Params | Body | Response | Status | Delegates | Quirks |
+|---|---|---|---|---|---|---|---|
+| GET | `/artifacts` | `thread_id`, `kind`, `status=open` | — | `list[ArtifactSummary]` | 200 | inline select | newest id first |
+| GET | `/artifacts/{artifact_id}` | path id | — | `ArtifactOut` | 200; 404 | inline get | spec + digest; not row cache |
+| GET | `/artifacts/{artifact_id}/rows` | `limit` (1–500), `offset`, `sort`, `force_refresh` | — | materialized dict | 200; 404; 422 unknown label; 400 other | `materialize_artifact` | UI fetch path; no LLM |
+| POST | `/artifacts/{artifact_id}/derive` | path id | `ArtifactDeriveIn` | `ArtifactOut` | 201; 404; 422; 400 | `derive_artifact` | zero-LLM spec mutation; `produced_by=user` |
+| DELETE | `/artifacts/{artifact_id}` | path id | — | — | **204**; 404 | inline | sets `status=expired`; does not DELETE the row |
+
+Proven: `tests/routers/test_artifacts.py`. [T]
+
 ---
 
 ## 5. Schemas / DTOs
@@ -630,7 +679,7 @@ Field lists are **[C]** (read from the Pydantic classes). Behavioral notes that 
 | `MappingDeleteOut` | `deleted_id`, `reclass_scanned`, `reclass_updated` | DELETE mapping |
 | `ImportMappingIn` | `date_col`, `description_col`, `amount_col`, optional `category_col`, `owner_col`, `type_col`, `merchant_col`, `sign_convention` | `AccountCreate.default_mapping` |
 | `AccountCreate` | `name`, `last4`, `default_owner_id=None`, `source_format="csv"`, `default_mapping` | `POST /accounts` |
-| `AccountOut` | `id`, `name`, `last4`, `default_owner_id`, `source_format` | accounts HTTP; `list_accounts` tool (**no mapping**) |
+| `AccountOut` | `id`, `name`, `last4`, `account_kind`, `default_owner_id`, `source_format` | accounts HTTP; `list_accounts` tool (**no mapping**) |
 | `UnmappedValuesOut` | `transaction_types`, `categories`, `owners`, `merchants=[]`, `merchants_without_category=[]` | import/reclass/apply/unmapped |
 | `SkippedOp` | `op: MappingOp`, `reason: "duplicate" \| "missing"` | `ApplyResult.skipped` |
 | `ApplyResult` | `created_ids`, `updated_ids`, `deleted_ids`, `skipped`, `overrides_set=0`, `overrides_removed=0`, `reclass_scanned`, `reclass_updated`, `unmapped_after` | apply HTTP; steward `apply_result` |
@@ -649,6 +698,9 @@ Field lists are **[C]** (read from the Pydantic classes). Behavioral notes that 
 | `GroupSummaryPage` | `groups`, `match_count`, `returned`, `truncated` | summarize + by-* aliases |
 | `ValueListOut` | `values: [{value, count}]`, `match_count`, `returned`, `truncated` | `GET /analytics/values`; `list_values` tool |
 | `TransactionListOut` | `totals: TotalOut`, `transactions: list[TransactionCard]`, `match_count`, `returned`, `truncated` | largest, search |
+| `ArtifactSummary` | `id`, `thread_id`, `kind`, `title`, `status`, `created_at`, `derived_from` | `GET /artifacts` |
+| `ArtifactOut` | summary fields + `run_id`, `produced_by`, `spec`, `digest`, `cache_as_of` | `GET /artifacts/{id}`, derive response |
+| `ArtifactDeriveIn` | `mutations: dict`, `title=None`, `thread_id=None` | `POST /artifacts/{id}/derive` |
 
 **Discriminated union:** `MappingOp = Annotated[Union[CreateMappingOp, UpdateMappingOp, DeleteMappingOp, SetTransactionCategoryOp, RemoveTransactionOverrideOp], Field(discriminator="op")]`. Parser: `app/schemas.py::parse_mapping_op` (passthrough if already a model; else `TypeAdapter`). **No `rules` field and no alias** on `MappingPlanIn`.
 
@@ -661,8 +713,9 @@ Field lists are **[C]** (read from the Pydantic classes). Behavioral notes that 
 | `EnrichmentRecommendation` | `proposed_overrides`, `merchant_rule_suggestions` (`CreateMappingOp` list), `unresolved`, `narrative` (≤600), `new_categories` (filled by validator) | `submit_recommendation`; `enrichment_proposals.recommendation` |
 | `StewardState` | extends `langchain.agents.AgentState`; extras: `proposed_ops: list[dict]`, `account_scope: int \| None`, `pending_preview: dict \| None`, `apply_result: dict \| None`, `rationale: str \| None`, `proposal_id: int` (all `NotRequired`) | `build_steward_builder` `state_schema`; `load_proposal` / execute `mark_consumed` |
 | `EnricherState` | extends `AgentState`; extras: `recommendation: dict`, `proposal_id: int` (both `NotRequired`; no custom reducers) | `build_enricher_builder` `state_schema`; `submit_recommendation` |
+| `AnalystState` | extends `AgentState`; extras: `artifact_ids: list[int]`, `narrative: str`, `ui: list[UIMessage]` with `ui_message_reducer` (all `NotRequired`) | `build_analyst` `state_schema`; `submit_analysis` / `push_ui_message` |
 
-`AgentState` (library): `messages: list[AnyMessage]` with `add_messages` reducer; `jump_to` ephemeral/private; `structured_response`. Steward/enricher extras have **no custom reducer** (last write wins). Evidence ids are validated at submit time against the DB, not accumulated in state.
+`AgentState` (library): `messages: list[AnyMessage]` with `add_messages` reducer; `jump_to` ephemeral/private; `structured_response`. Steward/enricher extras have **no custom reducer** (last write wins). Analyst `ui` uses `ui_message_reducer`. Evidence ids are validated at submit time against the DB, not accumulated in state.
 
 ### 5.3 Domain dataclasses (`app/domain/transaction.py`) — not Pydantic
 
@@ -685,7 +738,7 @@ Field lists are **[C]** (read from the Pydantic classes). Behavioral notes that 
 
 ### 6.2 `mapping.py`
 
-- `SignConvention` — see §3.11. [C]
+- `SignConvention` — see §3.12. [C]
 - `ImportMapping(date_col, description_col, amount_col, category_col=None, owner_col=None, type_col=None, merchant_col=None, sign_convention=None)` — `__post_init__` raises `ValueError("ImportMapping requires type_col or sign_convention")` if both missing.
 - `resolve_mapping(account_default_mapping, override=None) -> ImportMapping` — **always returns `account_default_mapping`**. `override` ignored. Proven: `tests/domain/test_mapping.py::test_resolve_mapping_ignores_override_for_now`.
 
@@ -716,7 +769,7 @@ Sign fallback runs only when `mapping.sign_convention` is set and raw type did n
 ### 6.6 `classification.py`
 
 - `NormalizationLookup.resolve(kind, raw_value, account_id, merchant=None) -> str | None` — keys already cleaned; None → caller fallback.
-- `clean_raw_value` — see §3.12. [C]
+- `clean_raw_value` — see §3.13. [C]
 - `classify_transaction_type` — empty → UNKNOWN; lookup miss or invalid canonical → UNKNOWN. Cleans merchant then lookup (same as category).
 - `allows_merchant_scope` — category and transaction_type.
 - `merchant_scope_matches` — pattern match on cleaned merchant scope (`%` wildcard; no `%` = exact).
@@ -1145,11 +1198,11 @@ flowchart TB
   COORD --> RDS["subagents.py::run_data_steward"]
   COORD --> RE["subagents.py::run_enricher"]
 
-  AA -->|"invoke messages=[task] only"| ANALYST["analyst.py::build_analyst\nno checkpointer"]
+  AA -->|"invoke task + thread_id"| ANALYST["analyst.py::build_analyst\nno checkpointer"]
   RDS -->|"invoke messages=[task] only"| STEW["build_steward_graph(checkpointer=None)\ninherits interrupt to parent"]
   RE -->|"invoke messages=[task] recursion_limit=15"| ENR["build_enricher_graph\nno checkpointer"]
 
-  ANALYST --> AT["ANALYST_TOOLS\nlist_* / search / analytics"]
+  ANALYST --> AT["ANALYST_TOOLS\nlist_* / search / analytics\nopen_artifact / submit_analysis"]
   ENR --> ET["ENRICHER_AGENT_TOOLS\nfind_receipts / get_evidence / submit_recommendation"]
   ET --> PROP["enrichment_proposals"]
   STEW --> SN["node steward\ncreate_agent STEWARD_AGENT_TOOLS"]
@@ -1169,15 +1222,15 @@ Nested graphs are **tools**, not StateGraph subgraph nodes. Interrupt still appe
 | Graph | Builder | State | Nodes / edges | End | Recursion | Checkpointer |
 |---|---|---|---|---|---|---|
 | Coordinator | `app/agent/coordinator.py::build_coordinator` | default `AgentState` (`messages` + add_messages) | `create_agent` internals; tools listed below | model stops calling tools | CLI `recursion_limit=25` | CLI: **required** (always passed). Studio (`studio.py`): `None` at compile; API server injects persistence. Docstring documents invariant. |
-| Analyst | `app/agent/analyst.py::build_analyst` | default `AgentState` | `create_agent`; `ANALYST_TOOLS` | same | inherit invoke config if passed; wrappers pass none | **None** (per-invocation) |
+| Analyst | `app/agent/analyst.py::build_analyst` | `AnalystState` | `create_agent`; `ANALYST_TOOLS` | `submit_analysis` (`return_direct=True`) | inherit invoke config if passed; `ask_analyst` forwards `thread_id` | **None** (per-invocation) |
 | Steward | `build_steward_builder` → `build_steward_graph` | `StewardState` | START→`steward`; conditional `_route_after_steward` → `human_approval` or END; `human_approval`/`execute` route via `Command(goto=...)` | no `proposed_ops` after steward node | CLI/tests 25 | Standalone CLI/tests: passed in. Coordinator path: `checkpointer=None` so `interrupt()` bubbles. Proven: `test_steward_standalone_compile_still_uses_checkpointer`, `test_steward_compiles_without_checkpointer_for_subagent_use` |
 | Enricher | `build_enricher_builder` → `build_enricher_graph` | `EnricherState` | START→`enricher` (`create_agent`); conditional `_route_after_enricher` → END | `submit_recommendation` (`return_direct=True`) writes `proposal_id`; outer graph always END | `run_enricher` / standalone invoke `recursion_limit=15` | **None**. Only the coordinator has a checkpointer. |
 
-`create_agent(..., name="coordinator"|"analyst"|"steward"|"enricher")`. Steward inner agent uses `state_schema=StewardState`; enricher uses `EnricherState`. Middleware: coordinator gets `CurrentDateMiddleware`; analyst gets `CurrentDateMiddleware` + `LedgerSnapshotMiddleware`; **steward and enricher `create_agent` do not**.
+`create_agent(..., name="coordinator"|"analyst"|"steward"|"enricher")`. Steward inner agent uses `state_schema=StewardState`; enricher uses `EnricherState`; analyst uses `AnalystState`. Middleware: coordinator gets `CurrentDateMiddleware`; analyst gets date + ledger snapshot + `ArtifactOffloadMiddleware` + `ContextEditingMiddleware`; **steward and enricher `create_agent` do not**.
 
 ### 8.3 Tools inventory
 
-Classification (same scheme as §0): **read-only** = no DB write and no graph-state write; **read-with-side-effect** = `find_receipts` (observation-cache write) and `load_proposal` (graph state); **non-read** = `submit_plan`, `run_data_steward`, `submit_recommendation`, `run_enricher`; **apply** = none. Gate = graph-state only. Delegate = nested invoke. Descriptions in the next subsection are the runtime `tool.description` strings, copied verbatim.
+Classification (same scheme as §0): **ledger-read** tools persist `analysis_artifacts` when they use `response_format="content_and_artifact"` (digest in `ToolMessage.content`, `{artifact_id, kind, component}` in `.artifact`). **`open_artifact`** is JIT retrieval (TOON text, no persist). **`submit_analysis`** is graph-state finish (`return_direct=True`). **read-with-side-effect** = `find_receipts` (observation-cache write) and `load_proposal` (graph state); **non-read** = `submit_plan`, `run_data_steward`, `submit_recommendation`, `run_enricher`, `submit_analysis`; **apply** = none. Gate = graph-state only. Delegate = nested invoke. Descriptions in the next subsection are the runtime `tool.description` strings, copied verbatim.
 
 **`app/agent/tools/read.py`**
 
@@ -1185,18 +1238,21 @@ Classification (same scheme as §0): **read-only** = no DB write and no graph-st
 |---|---|---|---|---|
 | `list_owners` | none | select Owner → `OwnerOut` | read | `app/agent/tools/read.py::list_owners` |
 | `list_accounts` | none | select Account → `AccountOut` | read | `app/agent/tools/read.py::list_accounts` |
-| `list_values` | `dimension`, `query=None`, `limit=25`, dates, ids | `analytics_service.list_values` | read | `app/agent/tools/read.py::list_values` |
+| `list_values` | `dimension`, `query=None`, `limit=25`, dates, ids | `analytics_service.list_values` → digest + `value_list` artifact | read + artifact persist | `app/agent/tools/read.py::list_values` |
 | `get_unmapped_values` | none | `app/services/analytics_service.py::unmapped_summary` | read | `app/agent/tools/read.py::get_unmapped_values` |
 | `list_mappings` | `kind=None`, `account_id=None`, `include_global=True` | `mapping_query.list_normalization_mappings` | read | `app/agent/tools/read.py::list_mappings` |
-| `list_transactions` | `account_id`, `owner_id`, `category`, `merchant`, `subcategory`, `date_from`, `date_to`, `limit=25` | `analytics_service.list_transactions` (no `date_to` default) | read | `app/agent/tools/read.py::list_transactions` |
+| `list_transactions` | `account_id`, `owner_id`, `category`, `merchant`, `subcategory`, `date_from`, `date_to`, `limit=50` | `analytics_service.list_transactions` (no `date_to` default) → digest + `transaction_list` artifact | read + artifact persist | `app/agent/tools/read.py::list_transactions` |
 | `get_transaction` | `transaction_id` | `analytics_service.get_transaction` | read | `app/agent/tools/read.py::get_transaction` |
-| `search_transactions` | `query`, `account_id`, `owner_id`, `date_from`, `date_to`, `merchant`, `category`, `subcategory`, `limit=200` | `app/services/analytics_service.py::search_transactions` (loose substring across description, merchant, category, type, owner; merchant/category filters are contains) | read | `app/agent/tools/read.py::search_transactions_tool` |
-| `summarize` | `group_by`, dates, ids, `merchant`, optional `transaction_type` / `category` / `subcategory`, optional `limit` | `app/services/analytics_service.py::summarize` → `GroupSummaryPage` | read | `app/agent/tools/read.py::summarize` |
-| `get_total` | dates, ids, `merchant`, optional `transaction_type`, optional `category`, optional `subcategory` | `app/services/analytics_service.py::get_total` | read | `app/agent/tools/read.py::get_total` |
-| `top_merchants` | `limit=10`, dates, ids, `merchant`, optional `transaction_type`, optional `category`, optional `subcategory` | `app/services/analytics_service.py::top_merchants` | read | `app/agent/tools/read.py::top_merchants` |
-| `largest_transactions` | `limit=10`, dates, ids, `merchant`, optional `transaction_type`, optional `category`, optional `subcategory` | `app/services/analytics_service.py::largest_transactions` | read | `app/agent/tools/read.py::largest_transactions` |
+| `search_transactions` | `query`, `account_id`, `owner_id`, `date_from`, `date_to`, `merchant`, `category`, `subcategory`, `limit=200` | `app/services/analytics_service.py::search_transactions` (loose substring across description, merchant, category, type, owner; merchant/category filters are contains) → digest + `transaction_list` artifact | read + artifact persist | `app/agent/tools/read.py::search_transactions_tool` |
+| `summarize` | `group_by`, dates, ids, `merchant`, optional `transaction_type` / `category` / `subcategory`, optional `limit` | `app/services/analytics_service.py::summarize` → digest + `group_summary` artifact | read + artifact persist | `app/agent/tools/read.py::summarize` |
+| `get_total` | dates, ids, `merchant`, optional `transaction_type`, optional `category`, optional `subcategory` | `analytics_service.get_total` → digest + `total` artifact | read + artifact persist | `app/agent/tools/read.py::get_total` |
+| `get_cash_flow` | dates, ids, `merchant`, optional `category` / `subcategory` | `analytics_service.cash_flow` → digest + `total` artifact | read + artifact persist | `app/agent/tools/read.py::get_cash_flow` |
+| `top_merchants` | `limit=10`, dates, ids, `merchant`, optional `transaction_type`, optional `category`, optional `subcategory` | `app/services/analytics_service.py::top_merchants` → digest + `group_summary` artifact | read + artifact persist | `app/agent/tools/read.py::top_merchants` |
+| `largest_transactions` | `limit=10`, dates, ids, `merchant`, optional `transaction_type`, optional `category`, optional `subcategory` | `app/services/analytics_service.py::largest_transactions` → digest + `transaction_list` artifact | read + artifact persist | `app/agent/tools/read.py::largest_transactions` |
+| `open_artifact` | `artifact_id`, `limit=20` (clamped 1–50), `offset=0` | `materialize_artifact` + `unwrap_offloaded_payload` + `slice_artifact_payload` + `encode_toon` | read | `app/agent/tools/read.py::open_artifact` |
+| `submit_analysis` | `artifact_ids: list[int]`, `narrative: str`; `return_direct=True` | `Command` sets `artifact_ids` + `narrative` | graph-state finish | `app/agent/tools/read.py::submit_analysis` |
 
-Lists: `CATALOG_TOOLS` (owners, accounts, values); `READ_TOOLS` = catalog + unmapped/mappings/list/get/search; `ANALYTICS_TOOLS` (summarize, get_total, get_cash_flow, top_merchants, largest); `ANALYST_TOOLS` = catalog + list/get/search + analytics.
+Lists: `CATALOG_TOOLS` (owners, accounts, values); `READ_TOOLS` = catalog + unmapped/mappings/list/get/search; `ANALYTICS_TOOLS` (summarize, get_total, get_cash_flow, top_merchants, largest); `ANALYST_TOOLS` = catalog + list/get/search + `open_artifact` + `submit_analysis` + analytics. Artifact-producing tools (`list_values`, `list_transactions`, `search_transactions`, analytics) return a digest string plus `{artifact_id, kind, component}` and emit `push_ui_message`. HTTP `GET /transactions` still defaults `limit=25`; the agent `list_transactions` tool defaults **50**.
 
 **`app/agent/tools/enricher.py`** — observation-cache writes only. Email source and extractor come from `EnricherDeps` via `set_enricher_deps` / `get_enricher_deps` (`app/agent/config.py`).
 
@@ -1222,15 +1278,15 @@ Lists: `CATALOG_TOOLS` (owners, accounts, values); `READ_TOOLS` = catalog + unma
 
 | Tool name | Args | Wraps | Class | Defined |
 |---|---|---|---|---|
-| `ask_analyst` | `task: str` | `analyst.invoke({"messages":[{"role":"user","content": task}]})` → last text | read delegate | nested in `make_subagent_tools` |
+| `ask_analyst` | `task: str`, `runtime: ToolRuntime` | `analyst.invoke(..., config={thread_id})` → `"artifacts: [ids]. {narrative}"` when `submit_analysis` ran, else last text | read delegate | nested in `make_subagent_tools` |
 | `run_data_steward` | `task: str` | `steward.invoke({...})` → `_steward_summary` | write-path delegate (apply only after interrupt resume) | nested in `make_subagent_tools` |
 | `run_enricher` | `task: str` | `enricher.invoke({...}, {recursion_limit: 15})` → `_enricher_summary` (submit text or last AI) | read + observation-cache delegate; returns proposal id text only | nested in `make_subagent_tools` |
 
-Wrappers: **no DB/session before invoke**. History control: parent sees only returned string. Proven: `tests/agent/test_coordinator.py::test_coordinator_history_excludes_analyst_internals`, `tests/agent/test_analyst.py::test_analyst_two_summarize_calls_wrapper_returns_final_only`.
+Wrappers: **no DB/session before invoke**. History control: parent sees only returned string. `ask_analyst` forwards parent `thread_id` so artifacts are thread-scoped. Proven: `tests/agent/test_coordinator.py::test_coordinator_history_excludes_analyst_internals`, `tests/agent/test_analyst.py::test_analyst_two_summarize_calls_wrapper_returns_final_only`, `test_analyst_submit_analysis_updates_state_and_thread_id`.
 
 Coordinator tools: `list_owners`, `list_accounts`, `list_values`, `get_total`, `get_cash_flow`, `summarize`, `ask_analyst`, `run_data_steward`, `run_enricher`.
 
-**Counts:** 24 tools; 18 read-only; 2 read-with-side-effect (`find_receipts`, `load_proposal`); 4 non-read (`submit_plan` gate, `run_data_steward` delegate, `submit_recommendation` observation-cache, `run_enricher` delegate). **0 apply tools.** The coordinator never relays op lists; it passes a proposal id in the steward task string.
+**Counts:** 26 tools; artifact-producing reads persist `analysis_artifacts`; 2 observation/graph side-effects (`find_receipts`, `load_proposal`); 5 finishes/delegates (`submit_plan`, `submit_analysis`, `submit_recommendation`, `run_data_steward`, `run_enricher`). **0 apply tools.** The coordinator never relays op lists; it passes a proposal id in the steward task string.
 
 Every tool that hits the DB uses `app/agent/config.py::tool_session` (open/close per call).
 
@@ -1245,7 +1301,7 @@ List registered owners (id and name).
 `list_accounts`:
 
 ```
-List accounts (id, name, last4).
+List accounts (id, name, last4, account_kind, default_owner_id, source_format).
 ```
 
 `get_unmapped_values`:
@@ -1267,12 +1323,12 @@ and once without (global rules).
 `list_transactions`:
 
 ```
-List stored transactions.
+List compact transaction cards (effective labels, no raw/override triples).
 
-Does not default date_to.
-category/subcategory must exist on stored transactions (case and whitespace
-insensitive). When both are set, rows must match both. merchant filters match
-the effective value. limit must be >= 1.
+Does not default date_to. merchant is exact unless it contains `%`.
+category/subcategory must exist on stored transactions. Returns
+{transactions, match_count, returned, truncated}. Use get_transaction for
+triples / raw_type / owner_raw. limit must be >= 1.
 ```
 
 `search_transactions`:
@@ -1318,8 +1374,42 @@ limit must be >= 1.
 ```
 Largest transactions by absolute amount with filter-scoped totals.
 
-Returns {totals, transactions}. date_to defaults to today, limit=10.
-Optional transaction_type filters the list. limit must be >= 1.
+Returns {totals, transactions, match_count, returned, truncated}.
+totals use get_total field meanings over the same window. The list
+includes all types unless transaction_type is set. Cards are compact;
+use get_transaction for triples. limit must be >= 1.
+```
+
+`get_cash_flow`:
+
+```
+Household cash-flow with the same core totals as get_total plus extras.
+
+Includes by_type, purchases, refunds, spend (purchases − refunds),
+net_cash_flow, total, count, average, plus income, fees, transfers,
+other, and other_count. net_cash_flow excludes transfers and other.
+Depository outflows that fund card payments may appear as SPEND until
+overridden — prefer account_id for a single-account view.
+merchant is exact unless it contains `%`.
+```
+
+`open_artifact`:
+
+```
+Retrieve a bounded TOON slice of an existing artifact by ID.
+
+Use this just-in-time retrieval tool when you need to inspect raw transaction
+rows or group records from a previous analysis result. Opening a
+large_tool_output artifact returns a sliced subset of the stored payload.
+```
+
+`submit_analysis`:
+
+```
+Submit the final analysis findings and finish the analyst turn.
+
+Takes a list of referenced artifact_ids and a concise narrative summary (<= 600 characters).
+This is the analyst's only finish.
 ```
 
 `preview_mapping_rules` (`app/agent/tools/steward.py::_PREVIEW_DESCRIPTION`):
@@ -1380,7 +1470,7 @@ Does not apply anything. A missing id returns an error string.
 `ask_analyst`:
 
 ```
-Delegate spending analysis: comparisons across months/owners/accounts/merchants/categories, trends, largest or unusual transactions, description search. Include all relevant scope in the task: exact date ranges, owner/account ids, whether refunds should be included.
+Delegate insights and discovery: comparisons, trends, patterns, and anything that may be mislabeled or split across names. Include date ranges, owner/account ids, and whether refunds count. Use this when the question is open, not only as a last resort.
 ```
 
 `run_data_steward`:
@@ -1474,11 +1564,17 @@ Questions about what a purchase was, or requests to enrich or research transacti
 
 ```
 You answer analysis questions over a personal transaction ledger. Your job is insights and discovery, not only a labeled total. Stored categories, merchants, and types can be wrong or split.
+Your only finish is submit_analysis, citing the artifact_ids you created and a concise narrative summary.
+
 Category and subcategory are independent labels on the same row and can overlap. A name may live on either axis. Both filters AND; do not add those two summaries.
 
-Row lists and catalogs can be truncated. If truncated is true and the page does not satisfy the question, call again with a tighter query or filter. Do not claim you covered the whole ledger unless the tool results actually do. search_transactions totals cover all matches even when the row list is truncated.
+Each analytics tool produces a query artifact (an interactive table, chart, or KPI the user already sees) and returns a compact digest: kind, match_count, truncated, resolved filters, headline totals, and a few sample rows. Cite the artifact_id in submit_analysis. Do not transcribe the artifact. For list, show, report, or summary asks, one complete artifact (truncated=false) plus submit_analysis is enough — do not page through rows to confirm a listing.
 
-search_transactions is a loose substring search across description, merchant, category, type, and owner fields (default limit 200). One call is one fragment. First fragments are stems from stored payee and label text. Hits are seeds: take distinctive stems from the returned description/merchant and search those too.
+Row lists and catalogs can be truncated. If truncated is true and the question needs coverage, call again with a higher limit or a tighter filter so the stored artifact is complete. Do not claim you covered the whole ledger unless the tool results actually do. search_transactions totals cover all matches even when the row list is truncated.
+
+Use open_artifact only when reasoning needs facts the digest does not have: payee stems, amounts and dates for duplicate or recurring checks, a row's labels, or an exact id. It returns a compact TOON slice (fields declared once, then rows). Keep limits small; page with offset only if that slice is still insufficient. Opening a large_tool_output artifact is allowed and returns a sliced subset; prefer the original query artifact when both exist.
+
+search_transactions is a loose substring search across description, merchant, category, type, and owner fields (default limit 200). One call is one fragment. First fragments are stems from stored payee and label text. Hits are seeds: take distinctive stems from the digest or from an open_artifact slice of description/merchant and search those too.
 
 Comparisons take multiple tool calls; compute deltas yourself. Report only numbers that appear in tool results. State the filters you used. Amounts are decimal strings.
 The task text should already contain resolved owner/account ids and concrete YYYY-MM-DD ranges; use list_owners/list_accounts only to confirm.
@@ -1487,9 +1583,11 @@ A ledger snapshot (owners, categories with their subcategories, transaction coun
 
 Guidelines for common asks — pick tools to fit; these are not a fixed sequence:
 
-- Discovery (subscriptions, "what might I be paying"): start from stored payee and label text. The attached snapshot already lists category/subcategory families; list_values on merchant (or a filtered slice) when you need counts or spellings beyond that. Search distinctive stems from description and merchant, including beyond a labeled category and the first catalog page. Hits are seeds: pull new stems from those cards and search those until a pass adds no new families. English words from the question are a later slice, after payee and label searches. Prefer a payee stem over a short prefix that matches many unrelated rows. list_values sorts by count, so one-off suffixes drop off — prefer search for those. Report what you found and which slices stayed truncated or unsearched.
+- List / show transactions: list_transactions (default limit 50) with the task's owner/account and dates. If truncated, raise limit once to match_count. Then submit_analysis citing that artifact. Do not open_artifact to read every row.
 
-- Recurring / duplicates: match on search cards, then search again with a stem from the suspected group to pull aliases. Recurring: same or near amount on a regular interval, including when merchant strings differ or the category is off. Duplicate: same or near amount, same or adjacent date, similar payee — often two accounts. Treat a funding transfer of a card charge as the same debt. Treat a refund of the same amount as a reversal. If truncated, tighten query or merchant/category contains-filters before treating the match set as complete.
+- Discovery (subscriptions, "what might I be paying"): start from stored payee and label text. The attached snapshot already lists category/subcategory families; list_values on merchant (or a filtered slice) when you need counts or spellings beyond that. Search distinctive stems from description and merchant, including beyond a labeled category and the first catalog page. Hits are seeds: pull new stems from digest samples or an open_artifact slice and search those until a pass adds no new families. English words from the question are a later slice, after payee and label searches. Prefer a payee stem over a short prefix that matches many unrelated rows. list_values sorts by count, so one-off suffixes drop off — prefer search for those. Report what you found and which slices stayed truncated or unsearched.
+
+- Recurring / duplicates: match on search cards (open_artifact if the digest samples are too few), then search again with a stem from the suspected group to pull aliases. Recurring: same or near amount on a regular interval, including when merchant strings differ or the category is off. Duplicate: same or near amount, same or adjacent date, similar payee — often two accounts. Treat a funding transfer of a card charge as the same debt. Treat a refund of the same amount as a reversal. If truncated, tighten query or merchant/category contains-filters before treating the match set as complete.
 
 - Spend on X: X may be a category, a subcategory, a merchant family, or text on the row. A labeled total is enough only when that label looks complete. If the total is thin, the spelling is unknown, or the same store has many merchant strings, search loosely or use merchant with `%`.
 
@@ -1499,7 +1597,7 @@ Guidelines for common asks — pick tools to fit; these are not a fixed sequence
 
 - Inconsistencies: look for the same payee under different categories or types. Use get_transaction when a row's labels look off. Report the inconsistency; do not invent mappings.
 
-- Largest / unusual: start from largest_transactions or a filtered search, then inspect rows. Do not call something unusual without the transactions.
+- Largest / unusual: start from largest_transactions or a filtered search, then inspect rows (digest samples, or open_artifact if those are not enough). Do not call something unusual without the transactions.
 ```
 
 **Enricher** — `app/agent/enricher_graph.py::ENRICHER_SYSTEM_PROMPT`
@@ -1550,6 +1648,7 @@ When the task references a proposal id, call load_proposal first, preview the op
 
 - `DATE_CONTEXT_PREFIX = "Current date:"`
 - `LEDGER_CONTEXT_PREFIX = "Ledger snapshot:"`
+- `OFFLOAD_EXEMPT_TOOLS = frozenset({"open_artifact", "submit_analysis"})`
 - `format_current_date(today) -> f"Current date: {today.isoformat()} ({today.strftime('%A')})."`
 - `format_ledger_snapshot(snapshot) ->` compact catalog: transaction count, distinct merchant count, `id=name` owners, categories with counts and nested subcategories. `(unassigned)` omitted as a subcategory when it is the only child.
 
@@ -1565,6 +1664,7 @@ Execute summary template: `"Plan executed. created_ids=... updated_ids=... delet
 {
   "ops": submitted,          # list[dict] as stored by submit_plan
   "preview": preview,        # MappingPreview.model_dump(mode="json"); additive `overrides` key
+  "preview_artifact_id": id or None,  # persisted mapping_preview artifact; interrupt still carries full preview
   "rationale": state.get("rationale"),
 }
 ```
@@ -1616,7 +1716,15 @@ CLI (`app/agent/cli.py::_decision`): `reject*` → `{"decision":"reject","ops":[
 
 `app/agent/middleware.py::CurrentDateMiddleware` — prefixes **last HumanMessage** of **this model call** with `format_current_date(clock())` + blank line (or a leading text block for list content). Skips if already prefixed. Does **not** change `system_message` or earlier humans. Attached on coordinator and analyst. Proven: `tests/agent/test_middleware.py::*`. Coordinator prompt contains no ISO date: `test_coordinator_prompt_has_no_interpolated_date`. [T]
 
-`app/agent/middleware.py::LedgerSnapshotMiddleware` — same injection point; analyst-only (`build_analyst(..., middleware=[CurrentDateMiddleware(), LedgerSnapshotMiddleware()])`). Loader defaults to `analytics_service.ledger_snapshot` via `tool_session`. Inserts after the date line when date is already present. Skips if `Ledger snapshot:` already appears. Snapshot is the **whole ledger** (not the task window): owners, categories with subcategories and row counts, transaction count, distinct merchant count. Not a spend total. Proven: `test_ledger_middleware_prefixes_last_human_and_leaves_system_untouched`, `test_date_then_ledger_inserts_snapshot_after_date`, `test_analyst_model_sees_ledger_snapshot`, `tests/services/test_ledger_snapshot.py`. [T]
+`app/agent/middleware.py::LedgerSnapshotMiddleware` — same injection point; analyst-only. Loader defaults to `analytics_service.ledger_snapshot` via `tool_session`. Inserts after the date line when date is already present. Skips if `Ledger snapshot:` already appears. Snapshot is the **whole ledger** (not the task window): owners, categories with subcategories and row counts, transaction count, distinct merchant count. Not a spend total. Proven: `test_ledger_middleware_prefixes_last_human_and_leaves_system_untouched`, `test_date_then_ledger_inserts_snapshot_after_date`, `test_analyst_model_sees_ledger_snapshot`, `tests/services/test_ledger_snapshot.py`. [T]
+
+`app/agent/middleware.py::ArtifactOffloadMiddleware` — `wrap_tool_call`: if `ToolMessage` content exceeds `max_tokens=2000`, persist `kind=large_tool_output` (`result={"raw": content}`) and replace content with a digest + "use open_artifact". **Exempt:** `OFFLOAD_EXEMPT_TOOLS = {open_artifact, submit_analysis}` so retrieval cannot offload itself. Proven: `test_artifact_offload_middleware_over_threshold`, `test_artifact_offload_middleware_exempts_open_artifact`, `test_artifact_offload_middleware_exempts_submit_analysis`. [T]
+
+`open_artifact` unwraps nested `{raw: json}` (including escaped JSON from a prior offload) via `unwrap_offloaded_payload`, slices `transactions` / `groups` / `merchants` / `values` / `lines`, and encodes with `app/services/toon.py::encode_toon`. Non-JSON raw is line-sliced. Proven: `test_open_artifact_unwraps_large_tool_output_without_double_escape`, `test_open_artifact_slices_non_json_large_tool_output`, `tests/services/test_toon.py`. [T]
+
+`ContextEditingMiddleware` + `ClearToolUsesEdit(trigger=100000, keep=3)` — analyst-only; clears oldest tool uses past a high token trigger. [C]
+
+Analyst middleware order: `CurrentDateMiddleware`, `LedgerSnapshotMiddleware`, `ArtifactOffloadMiddleware`, `ContextEditingMiddleware`.
 
 **Not covered here:** LangGraph `create_agent` internals; provider token streaming.
 
@@ -1735,14 +1843,14 @@ Internals of `enrich_transaction` [T] `tests/enrichment/test_enrichment_service.
 | | Coordinator | Analyst | Steward | Enricher |
 |---|---|---|---|---|
 | Builder | `build_coordinator` | `build_analyst` | `build_steward_graph` | `build_enricher_graph` |
-| Can read | `list_owners`, `list_accounts`, `list_values`, `get_total`, `get_cash_flow`, `summarize`; plus whatever subagents return as **text** | `ANALYST_TOOLS`: catalog, list/get/search, summarize, get_total, get_cash_flow, top_merchants, largest | `READ_TOOLS` + preview + `load_proposal` | `list_accounts`, `list_values`, `list_transactions`, `get_transaction`, `search_transactions`, `email_source_status`, `get_evidence`, `list_unmatched`; mailbox **only** via `find_receipts` |
-| Can write | nothing directly; `run_data_steward` may apply **after** interrupt; `run_enricher` writes observation cache | **nothing** | graph state via `submit_plan`; DB only in `execute` via `apply_mapping_plan` (+ `mark_consumed`) | `transaction_evidence` / `merchant_senders` via `find_receipts`; `enrichment_proposals` via `submit_recommendation` |
+| Can read | `list_owners`, `list_accounts`, `list_values`, `get_total`, `get_cash_flow`, `summarize`; plus whatever subagents return as **text** | `ANALYST_TOOLS`: catalog, list/get/search, `open_artifact`, analytics; finish `submit_analysis` | `READ_TOOLS` + preview + `load_proposal` | `list_accounts`, `list_values`, `list_transactions`, `get_transaction`, `search_transactions`, `email_source_status`, `get_evidence`, `list_unmatched`; mailbox **only** via `find_receipts` |
+| Can write | nothing directly; `run_data_steward` may apply **after** interrupt; `run_enricher` writes observation cache | `analysis_artifacts` via analytics tools / offload middleware; **no ledger writes** | graph state via `submit_plan`; DB only in `execute` via `apply_mapping_plan` (+ `mark_consumed`); `mapping_preview` artifact at interrupt | `transaction_evidence` / `merchant_senders` via `find_receipts`; `enrichment_proposals` via `submit_recommendation` |
 | Cannot | see subagent internals; pass op lists to steward; search mailbox itself | write; see mappings (`get_unmapped_values` / `list_mappings` are steward-only among those) | apply via a tool; hold a DB session across interrupt | issue an arbitrary mailbox query; fetch by id; see message bodies or line-item descriptions; write `Transaction` / mappings / `transaction_overrides`; expand task scope |
 | Scope in | user chat + date middleware | task string + date and ledger snapshot middleware | **task string only** (ids/dates/proposal id must be in it) | **task string only** |
-| Ends | model stops calling tools | same | no `proposed_ops` after steward node, or after wrap-up | exactly one `submit_recommendation` then END |
-| Recursion | CLI 25 | inherit if passed; wrappers pass none | CLI/tests 25 | invoke 15 (`run_enricher` and `--enricher`) |
+| Ends | model stops calling tools | `submit_analysis` | no `proposed_ops` after steward node, or after wrap-up | exactly one `submit_recommendation` then END |
+| Recursion | CLI 25 | inherit if passed; `ask_analyst` forwards `thread_id` | CLI/tests 25 | invoke 15 (`run_enricher` and `--enricher`) |
 | Checkpointer | **required** on CLI; Studio `None` (server injects) | **None** | CLI: passed; nested under coordinator: `None` so interrupt bubbles | **None** |
-| Middleware | `CurrentDateMiddleware` | `CurrentDateMiddleware` + `LedgerSnapshotMiddleware` | **none** | **none** |
+| Middleware | `CurrentDateMiddleware` | date + ledger snapshot + `ArtifactOffloadMiddleware` + `ContextEditingMiddleware` | **none** | **none** |
 | Model env | `STEWARD_MODEL` | `STEWARD_MODEL` | `STEWARD_MODEL` | `ENRICHER_MODEL` or fallback `STEWARD_MODEL` |
 
 Which agent can search the mailbox? **Only the enricher**, and only by passing **transaction ids** to `find_receipts` (1–25). The search query is built in `plan_candidate_search` from that transaction's merchant/senders/window — the model cannot supply a Gmail `q`. [T] tool description + `test_enricher_writes_no_effective_values`
@@ -2016,19 +2124,19 @@ There is **no** `--add-sender` flag.
 ---
 ## 12. Testing strategy
 
-Run: `.venv/bin/python -m pytest` (300 passed, 2 deselected `live_gmail` + `live_gmail_rest`). `scripts/verify_api.py` is a separate HTTP walkthrough, not pytest.
+Run: `.venv/bin/python -m pytest` (414 passed, 2 deselected `live_gmail` + `live_gmail_rest`). `scripts/verify_api.py` is a separate HTTP walkthrough, not pytest.
 
 | Suite | Covers | Fixtures / fakes |
 |---|---|---|
-| `tests/test_smoke.py` | `/health`, `/docs`; `test_session_creates_tables` asserts **five** table names exist (`owners`, `accounts`, `transactions`, `import_batches`, `normalization_mappings`). It does **not** assert the four enrichment tables. [T] | `client`, `db_session` |
+| `tests/test_smoke.py` | `/health`, `/docs`; `test_session_creates_tables` asserts **five** table names exist (`owners`, `accounts`, `transactions`, `import_batches`, `normalization_mappings`). It does **not** assert the four enrichment tables or `analysis_artifacts`. [T] | `client`, `db_session` |
 | `tests/domain/` | mapping validation, resolve placeholder, CSV source, parse/classify/merchant/dedupe, merged vs DB lookup | `InMemoryNormalizationLookup` (`tests/fakes.py`) |
 | `tests/enrichment/` | allowlist enforcement, deterministic receipt matching, enrichment persistence/rollback, trace redaction (including Gmail adapter strippers), enrichment CLI, model extractor behavior, synthetic golden emails for regex fallback | `FakeEmailSource`, `FakeExtractor`, fake structured-output model, shared SQLite |
 
-`tests/enrichment/test_model_extractor.py::test_extraction_prompt_is_verbatim_in_project_map` **reads `docs/PROJECT-MAP.md`** and asserts `EXTRACTION_SYSTEM_PROMPT` appears verbatim. `tests/agent/test_enricher.py::test_enricher_prompt_is_verbatim_in_project_map` does the same for `ENRICHER_SYSTEM_PROMPT`. Editing those prompt blocks without keeping them byte-identical fails CI. [T]
+`tests/enrichment/test_model_extractor.py::test_extraction_prompt_is_verbatim_in_project_map` **reads `docs/PROJECT-MAP.md`** and asserts `EXTRACTION_SYSTEM_PROMPT` appears verbatim. `tests/agent/test_enricher.py::test_enricher_prompt_is_verbatim_in_project_map` does the same for `ENRICHER_SYSTEM_PROMPT`. `tests/agent/test_analyst.py::test_analyst_prompt_is_verbatim_in_project_map` does the same for `ANALYST_PROMPT`. Editing those prompt blocks without keeping them byte-identical fails CI. [T]
 | `tests/enrichment/gmail_mcp/` | query builder, mapping, adapter, transport error mapping, env factory; synthetic Gmail MCP fixtures only | `FakeMcpTransport`; fixtures under `tests/enrichment/gmail_mcp/fixtures/` |
 | `tests/enrichment/gmail_rest/` | shared-move imports, REST mapping/MIME walk, four-endpoint client allowlist, adapter pagination/N+1, env factory; synthetic fixtures: `list_two_pages_p1.json`/`_p2.json`, `metadata_ok.json`, `metadata_malformed_from.json`, `metadata_out_of_window.json`, `full_plain_and_html.json`, `full_plain_stub_and_html.json`, `full_html_only.json`, `full_mixed_with_attachment.json`, `full_single_part.json`, `full_base64url_chars.json`, `profile.json`, `error_403_scope.json`, `error_429.json` | `FakeGmailRestClient`; fixtures under `tests/enrichment/gmail_rest/fixtures/` |
-| `tests/routers/` | HTTP contracts, import+dedupe+patch, reclassify gates, analytics aliases/filters, mapping CRUD/preview/apply | TestClient + shared SQLite |
-| `tests/services/` | preview purity/gates/shadow/conflict; apply txn/idempotency/conflicts | direct service calls |
+| `tests/routers/` | HTTP contracts, import+dedupe+patch, reclassify gates, analytics aliases/filters, mapping CRUD/preview/apply, artifacts list/rows/derive/expire | TestClient + shared SQLite |
+| `tests/services/` | preview purity/gates/shadow/conflict; apply txn/idempotency/conflicts; artifact persist/materialize/derive/cleanup; TOON encode | direct service calls |
 | `tests/agent/` | scripted graphs, interrupt/resume, CLI parse/config, middleware, coordinator routing, Studio entrypoints, enricher happy/unavailable/write-snapshot, coordinator enrichment e2e | `ScriptedChatModel`, `agent_sessions`, `seed_coffee`, `capture_apply`, `FakeEmailSource`, `FakeExtractor` |
 | `tests/agent/test_coordinator_enrichment_flow.py` | scripted coordinator+enricher+steward: proposal #1, interrupt ops, approve/reject, `EMAIL_PROVIDER=none`, checkpointer pin | fakes + wrap-through apply |
 | `tests/services/test_proposal_service.py` | recommendation validation, `proposal_to_ops` shapes | shared SQLite |
@@ -2078,7 +2186,7 @@ Gaps that are product non-goals (splits, Alembic, live-model CI, …) live in **
 | `match_receipt` constants | evidence confidence vs `ENRICHMENT_CONFIDENCE_THRESHOLD`; `learn_sender` gate | Restoring `raw_confidence+0.2` re-breaks exact_total at 0.0 self-score | [T] `test_exact_total_zero_raw_confidence_clears_threshold` |
 | `ApplyResult` fields | execute summary, `_steward_summary`, HTTP apply, coordinator prompt | Adding a field is additive; removing/renaming breaks verbatim relay | [T] steward count tests; [C] format strings |
 | `EnrichmentRecommendation` | `submit_recommendation`, `validate_recommendation`, `store_proposal`, `proposal_to_ops` | Shape change breaks proposal JSON and steward ops | [T] `test_proposal_service.py` |
-| Interrupt payload `{ops, preview, rationale}` | CLI print, resume, Studio | Adding keys is OK; removing `ops` breaks `edit` | [T] interrupt flow tests |
+| Interrupt payload `{ops, preview, preview_artifact_id, rationale}` | CLI print, resume, Studio | Adding keys is OK; removing `ops` breaks `edit` | [T] interrupt flow tests |
 
 **Not covered here:** FastAPI OpenAPI compatibility; pandas CSV dialect.
 
@@ -2116,7 +2224,8 @@ Verified against code:
 27. **Body selection is by substance, not presence.** Transactional email commonly ships a plain-text stub alongside the real HTML body. When both `text/plain` and `text/html` exist, `html_to_text` is applied to the HTML and plain is chosen only if `len(plain) ≥ 0.5 × len(html_text)`; otherwise the converted HTML is used with `body_source="text/html (plain stub)"`. Single-part messages are unchanged. `--enrich --inspect` reports `plain_bytes` and `html_text_bytes` so the choice is visible without printing the body.
 28. **Extraction describes; it does not classify.** The original `EXTRACTION_SYSTEM_PROMPT` offered `known_categories` in the human message and told the model to pick `category_hint` from that list. Live runs then coarsened product-level detail into the bank's taxonomy (a television becoming "Shopping"). The prompt no longer includes the list. `LineItem.product_type` is a specific free-form product kind; `category_hint` is the model's own short category. `known_categories` is still loaded and consumed by `snap_category` so `dominant_category` is a stored canonical or `"unknown"`; `dominant_category_raw` stores the hint verbatim.
 29. **Match confidence comes from evidence, not model self-report.** The original `match_receipt` formula was `min(1.0, raw_confidence + 0.2)` for `exact_total` and `raw_confidence * 0.8` for `split_partial`, so a model that extracted a matching total but self-scored `raw_confidence=0.0` produced 0.2 and failed the 0.8 threshold — an arithmetic match vetoed by self-confidence. `exact_total` is now base 0.9 (+0.1 if `order_id` is present, cap 1.0); `split_partial` is base 0.7 (+0.1 if `order_id`); only `date_only` still scales by `raw_confidence` (0.4×), because there the model's read is all we have. `ModelReceiptExtractor` binds temperature 0 and rewrites `raw_confidence` of exactly 0.0 with a non-null total to 0.5 (the model contradicting itself).
-30. **Hint-path learning stores the retrieval phrase, not the payee.** A learned `merchant_senders` row keyed on the full payee (`best buy 1234 westheimer rd houston tx`) would not tolerant-match the next variant of the same merchant. On the hint path, `learn_sender` now stores the hint phrase used for retrieval (e.g. `best buy`). Existing learned rows are not migrated. Non-hint learning is unchanged.
+31. **The analyst finishes via `submit_analysis`, not last text.** Analytics tools persist an `analysis_artifacts` row and return a digest. Listing asks should cite that id without paging rows (`open_artifact` is JIT only). `ArtifactOffloadMiddleware` exempts `open_artifact` / `submit_analysis`. Agent `list_transactions` defaults to limit 50; HTTP `GET /transactions` stays 25.
+32. **`ProposalStatus.discarded` is written by artifact/proposal TTL cleanup**, not by steward execute. `cleanup_expired_artifacts_and_proposals` expires artifacts past `expires_at` and marks leftover open proposals discarded.
 
 30. **`account_kind` is required on create and not inferred from `type_col`.** Chase **checking** CSVs include a Type column (`ACH_CREDIT`, `LOAN_PMT`, …); inferring `credit_card` from `type_col` would mis-kind them. Backfill in `init_db` is a one-off guess (`type_col` set → card, else depository). Fix via SQL + reclassify (see QA.md). No `PATCH /accounts` for kind this round.
 31. **Checking card payments stay SPEND on sign-only imports** until an account-scoped `loan_pmt`→`TRANSFER` rule or `type_override`. Default seeds omit `loan_pmt` because Chase uses it for mortgage/auto too. Card-side `Payment` maps to TRANSFER via kind-scoped seed.
@@ -2140,7 +2249,7 @@ Verified against code:
 | `LIVE-RUN-LESSONS.md` item 6 | “Seeding runs on every `--enrich`” | **Resolved.** `_run_enrich` always calls `seed_merchant_senders` before dry-run / inspect / range. `--seed-senders` is a compatibility no-op. [T] `test_cli_dry_run_seeds_senders_on_fresh_database` |
 | Prior PROJECT-MAP §12 smoke | “eight tables exist” | `test_session_creates_tables` asserts **five** names. Enrichment tables exist via `create_all` but are not asserted there. |
 | Prior PROJECT-MAP §3.8 | `merchant_key` = cleaned effective merchant only | Hint-path learned rows store the hint phrase; no migration. |
-| Prior PROJECT-MAP §3.10 | `consumed` “is Part B”; `discarded` undocumented as unused | `consumed` is implemented; `discarded` is declared, never written. |
+| Prior PROJECT-MAP §3.10 | `consumed` “is Part B”; `discarded` undocumented as unused | `consumed` is implemented; `discarded` is written by `cleanup_expired_artifacts_and_proposals`. |
 | Prior PROJECT-MAP §7.4 | “no-network/no-LLM path in Part A”; Gmail only under `gmail_mcp/` | `ModelReceiptExtractor` and `gmail_rest` exist. |
 
 Stale docs were **not** copied forward except as this discrepancy list.
@@ -2162,8 +2271,8 @@ Moved from §12 "deliberately not covered" and extended. For each: what would be
 | Alembic | `init_db` + two ALTER helpers | Migration tool + version table |
 | Concurrency | Single-writer assumption | Locks on apply/enrich; checkpointer already thread-id scoped |
 | Live-model tests | Scripted `ScriptedChatModel`; live Gmail smokes deselected | Paid CI + fixtures; non-determinism remains |
-| Chat UI | CLI interrupt contract is the API | Same `{ops,preview,rationale}` / `{decision,ops}` |
-| Proposal expiry | `open` until `consumed`; `discarded` never written | Writer for `discarded` + TTL job |
+| Chat UI | CLI interrupt contract is the API | Same `{ops,preview,preview_artifact_id,rationale}` / `{decision,ops}`; read results via `/artifacts` |
+| Proposal expiry | `cleanup_expired_artifacts_and_proposals` marks artifacts `expired` and leftover open proposals `discarded` | Wire a scheduled job; TTL values |
 | Model extraction non-determinism | temperature 0; 0.0-with-total rewrite | Still not bit-stable across providers; treat as [C] |
 | N+1 REST | by design, bounded | Batch get if Google adds one; do not uncap `max_results` |
 | Studio Python version | ≥3.11 &lt;3.14; Dockerfile 3.12 | Separate 3.12 venv for `make studio` |

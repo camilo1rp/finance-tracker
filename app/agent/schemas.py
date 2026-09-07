@@ -1,6 +1,7 @@
-from typing import NotRequired
+from typing import Annotated, NotRequired
 
 from langchain.agents import AgentState
+from langgraph.graph.ui import UIMessage, ui_message_reducer
 from pydantic import BaseModel, Field
 
 from app.schemas import CreateMappingOp
@@ -39,3 +40,10 @@ class StewardState(AgentState):
 class EnricherState(AgentState):
     recommendation: NotRequired[dict]
     proposal_id: NotRequired[int]
+
+
+class AnalystState(AgentState):
+    artifact_ids: NotRequired[list[int]]
+    narrative: NotRequired[str]
+    ui: NotRequired[Annotated[list[UIMessage], ui_message_reducer]]
+
