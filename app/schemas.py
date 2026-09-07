@@ -1,9 +1,9 @@
 """
 Pydantic models -- the API's request/response contract.
 """
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
@@ -386,3 +386,41 @@ class ValueListOut(BaseModel):
     match_count: int
     returned: int
     truncated: bool
+
+
+# ---- Analysis Artifacts ----
+
+class ArtifactSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    thread_id: str
+    kind: str
+    title: str
+    status: str
+    created_at: datetime
+    derived_from: int | None = None
+
+
+class ArtifactOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    thread_id: str
+    run_id: str | None = None
+    produced_by: str
+    kind: str
+    title: str
+    spec: dict[str, Any]
+    digest: dict[str, Any]
+    cache_as_of: datetime | None = None
+    derived_from: int | None = None
+    status: str
+    created_at: datetime
+
+
+class ArtifactDeriveIn(BaseModel):
+    mutations: dict[str, Any] = Field(default_factory=dict)
+    title: str | None = None
+    thread_id: str | None = None
+

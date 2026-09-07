@@ -209,6 +209,25 @@ class EnrichmentProposal(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
 
 
+class AnalysisArtifact(Base):
+    __tablename__ = "analysis_artifacts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    thread_id: Mapped[str] = mapped_column(String, index=True, default="standalone")
+    run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    produced_by: Mapped[str] = mapped_column(String)  # analyst, coordinator, steward, enricher
+    kind: Mapped[str] = mapped_column(String)  # group_summary, transaction_list, total, value_list, mapping_preview, comparison
+    title: Mapped[str] = mapped_column(String(80))
+    spec: Mapped[dict] = mapped_column(JSON)
+    digest: Mapped[dict] = mapped_column(JSON)
+    cache: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
+    cache_as_of: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    derived_from: Mapped[int | None] = mapped_column(ForeignKey("analysis_artifacts.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String, default="open")  # open, superseded, expired
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow_naive)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 effective_category = case(
     (Transaction.category_override.isnot(None), Transaction.category_override),
     (Transaction.category_normalized.isnot(None), Transaction.category_normalized),
