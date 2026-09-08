@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import copy
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.models import AnalysisArtifact, _utcnow_naive
@@ -148,6 +148,52 @@ def format_digest(
     return "\n".join(lines)
 
 
+def extract_digest_summary(kind: str, safe_result: Any) -> dict[str, Any]:
+    """Extract structured preview fields to attach to artifact.digest for UI rendering."""
+    summary: dict[str, Any] = {}
+    if not isinstance(safe_result, dict):
+        return summary
+
+    if kind == "total":
+        for k in ("spend", "net_cash_flow", "purchases", "refunds", "total", "count", "average", "sign_convention"):
+            if k in safe_result:
+                summary[k] = safe_result[k]
+        summary["match_count"] = safe_result.get("count")
+        summary["truncated"] = False
+    elif kind == "group_summary":
+        summary["groups"] = safe_result.get("groups", [])[:10]
+        summary["match_count"] = safe_result.get("match_count")
+        summary["truncated"] = safe_result.get("truncated", False)
+        if "totals" in safe_result and isinstance(safe_result["totals"], dict):
+            summary["totals"] = safe_result["totals"]
+            for k in ("spend", "net_cash_flow", "purchases", "refunds", "total"):
+                if k in safe_result["totals"]:
+                    summary[k] = safe_result["totals"][k]
+    elif kind == "transaction_list":
+        txs = safe_result.get("transactions", [])[:20]
+        summary["transactions"] = txs
+        summary["sample_rows"] = txs
+        summary["match_count"] = safe_result.get("match_count")
+        summary["truncated"] = safe_result.get("truncated", False)
+    elif kind == "value_list":
+        vals = safe_result.get("values", [])[:20]
+        summary["values"] = vals
+        summary["sample_items"] = vals
+        summary["match_count"] = safe_result.get("match_count")
+        summary["truncated"] = safe_result.get("truncated", False)
+    elif kind == "mapping_preview":
+        summary["preview"] = safe_result
+    elif kind == "comparison":
+        summary["period_a"] = safe_result.get("period_a")
+        summary["period_b"] = safe_result.get("period_b")
+        summary["delta"] = safe_result.get("delta")
+    elif kind == "large_tool_output":
+        raw = safe_result.get("raw") if isinstance(safe_result, dict) else str(safe_result)
+        summary["raw"] = raw[:1000] if isinstance(raw, str) else str(raw)[:1000]
+
+    return summary
+
+
 def persist_artifact(
     db: Session,
     *,
@@ -159,11 +205,14 @@ def persist_artifact(
     produced_by: str = "analyst",
     run_id: str | None = None,
     derived_from: int | None = None,
+    status: str = "open",
+    expires_in_seconds: int | None = None,
 ) -> tuple[int, str]:
     """Persist an analysis artifact and return (artifact_id, digest_text)."""
     safe_result = _json_safe(result)
     safe_spec = _json_safe(spec)
     filters = safe_spec.get("kwargs", {}) if isinstance(safe_spec, dict) else {}
+    summary_data = extract_digest_summary(kind, safe_result)
 
     # Format initial digest
     digest_text = format_digest(kind, safe_result, filters, title=title)
@@ -171,7 +220,15 @@ def persist_artifact(
         "text": digest_text,
         "kind": kind,
         "title": title,
+        **summary_data,
     }
+
+    if expires_in_seconds is not None:
+        expires_at = _utcnow_naive() + timedelta(seconds=expires_in_seconds)
+    elif status == "provisional":
+        expires_at = _utcnow_naive() + timedelta(seconds=3600)
+    else:
+        expires_at = None
 
     artifact = AnalysisArtifact(
         thread_id=thread_id or "standalone",
@@ -184,8 +241,9 @@ def persist_artifact(
         cache=safe_result,
         cache_as_of=_utcnow_naive(),
         derived_from=derived_from,
-        status="open",
+        status=status,
         created_at=_utcnow_naive(),
+        expires_at=expires_at,
     )
     db.add(artifact)
     db.commit()
@@ -200,10 +258,41 @@ def persist_artifact(
         "kind": kind,
         "title": title,
         "artifact_id": artifact.id,
+        **summary_data,
     }
     db.commit()
 
     return artifact.id, final_digest_text
+
+
+def promote_cited_artifacts(
+    db: Session,
+    thread_id: str,
+    cited_ids: list[int],
+    run_id: str | None = None,
+) -> None:
+    """Promote cited provisional artifacts to open status, and mark uncited provisional artifacts as superseded."""
+    if cited_ids:
+        update_vals: dict[str, Any] = {"status": "open", "expires_at": None}
+        if thread_id and thread_id != "standalone":
+            update_vals["thread_id"] = thread_id
+        db.execute(
+            update(AnalysisArtifact)
+            .where(AnalysisArtifact.id.in_(cited_ids))
+            .values(**update_vals)
+        )
+
+    demote_stmt = update(AnalysisArtifact).where(
+        AnalysisArtifact.thread_id == thread_id,
+        AnalysisArtifact.status == "provisional",
+    )
+    if cited_ids:
+        demote_stmt = demote_stmt.where(AnalysisArtifact.id.not_in(cited_ids))
+    if run_id:
+        demote_stmt = demote_stmt.where(AnalysisArtifact.run_id == run_id)
+
+    db.execute(demote_stmt.values(status="superseded"))
+    db.commit()
 
 
 def execute_spec(db: Session, tool_name: str, kwargs: dict[str, Any]) -> Any:
@@ -278,6 +367,7 @@ def execute_spec(db: Session, tool_name: str, kwargs: dict[str, Any]) -> Any:
             account_id,
             owner_id,
             limit=limit or 10,
+            offset=kw.get("offset", 0),
             merchant=merchant,
             transaction_type=transaction_type,
             category=category,
@@ -293,6 +383,8 @@ def execute_spec(db: Session, tool_name: str, kwargs: dict[str, Any]) -> Any:
             owner_id,
             query=query,
             limit=limit or 50,
+            offset=kw.get("offset", 0),
+            sort=kw.get("sort"),
             merchant=merchant,
             category=category,
             subcategory=subcategory,
@@ -308,6 +400,8 @@ def execute_spec(db: Session, tool_name: str, kwargs: dict[str, Any]) -> Any:
             category=category,
             subcategory=subcategory,
             limit=limit or 25,
+            offset=kw.get("offset", 0),
+            sort=kw.get("sort"),
         )
     if tool_name == "list_values":
         dimension = kw.get("dimension", "category")
@@ -341,9 +435,24 @@ def materialize_artifact(
 
     spec = artifact.spec or {}
     tool_name = spec.get("tool")
+    if tool_name is None and artifact.cache is not None:
+        cached = copy.deepcopy(_json_safe(artifact.cache))
+        if isinstance(cached, dict):
+            for key in ("transactions", "rows", "groups", "values"):
+                if key in cached and isinstance(cached[key], list):
+                    items = cached[key]
+                    start = offset or 0
+                    end = start + limit if limit else len(items)
+                    cached[key] = items[start:end]
+        return cached
+
     kwargs = copy.deepcopy(spec.get("kwargs", {}))
     if limit is not None:
         kwargs["limit"] = limit
+    if offset is not None:
+        kwargs["offset"] = offset
+    if sort is not None:
+        kwargs["sort"] = sort
 
     fresh_result = execute_spec(db, tool_name, kwargs)
     safe = _json_safe(fresh_result)
@@ -414,7 +523,7 @@ def cleanup_expired_artifacts_and_proposals(
 
     # 1. Expire artifacts past expires_at
     expired_artifacts_stmt = select(AnalysisArtifact).where(
-        AnalysisArtifact.status == "open",
+        AnalysisArtifact.status != "expired",
         AnalysisArtifact.expires_at.isnot(None),
         AnalysisArtifact.expires_at <= current_time,
     )

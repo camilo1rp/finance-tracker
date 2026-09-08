@@ -1,19 +1,34 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
+from app.agent.config import open_checkpointer
+from app.agent.coordinator import build_coordinator
 from app.database import init_db
-from app.routers import accounts, analytics, artifacts, imports, mappings, owners, transactions
+from app.routers import accounts, agent, analytics, artifacts, imports, mappings, owners, transactions
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI):
+async def lifespan(app: FastAPI):
     init_db()
-    yield
+    with open_checkpointer() as checkpointer:
+        app.state.checkpointer = checkpointer
+        app.state.coordinator_graph = build_coordinator(checkpointer=checkpointer)
+        yield
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Family Finance Tracker", lifespan=lifespan)
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     app.include_router(accounts.router)
     app.include_router(owners.router)
     app.include_router(mappings.router)
@@ -21,6 +36,7 @@ def create_app() -> FastAPI:
     app.include_router(transactions.router)
     app.include_router(analytics.router)
     app.include_router(artifacts.router)
+    app.include_router(agent.router)
 
     @app.get("/health")
     def health() -> dict[str, str]:

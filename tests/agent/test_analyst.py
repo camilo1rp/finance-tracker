@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.analyst import ANALYST_PROMPT, build_analyst
 from app.agent.middleware import LEDGER_CONTEXT_PREFIX
-from app.models import Account, Owner, Transaction
+from app.models import Account, AnalysisArtifact, Owner, Transaction
 from langchain.agents.middleware.summarization import count_tokens_approximately
 from tests.agent.helpers import ScriptedChatModel, agent_sessions, seed_coffee
 
@@ -448,6 +448,86 @@ def test_open_artifact_slices_non_json_large_tool_output(
     assert "line-one" not in text
     assert "line-four" not in text
     assert "total: 4" in text
+
+
+def test_analyst_provisional_and_promote_lifecycle(
+    db_session: Session, agent_sessions
+) -> None:
+    seed_coffee(db_session)
+    owner = db_session.scalars(select(Owner)).one()
+
+    model = ScriptedChatModel(
+        responses=[
+            # 1. Exploratory probe: list_values
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "list_values",
+                        "args": {"dimension": "category"},
+                        "id": "probe-call-1",
+                    }
+                ],
+            ),
+            # 2. Key deliverable: summarize
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "summarize",
+                        "args": {"group_by": "category", "owner_id": owner.id},
+                        "id": "deliverable-call-2",
+                    }
+                ],
+            ),
+            # 3. JIT inspect deliverable before submitting
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "open_artifact",
+                        "args": {"artifact_id": 2, "limit": 10},
+                        "id": "open-call-3",
+                    }
+                ],
+            ),
+            # 4. Final finish: submit_analysis citing only deliverable (artifact 2)
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "submit_analysis",
+                        "args": {
+                            "artifact_ids": [2],
+                            "narrative": "Found dominant category.",
+                        },
+                        "id": "submit-call-4",
+                    }
+                ],
+            ),
+        ]
+    )
+    analyst = build_analyst(model=model)
+    res = analyst.invoke(
+        {"messages": [{"role": "user", "content": "Analyze categories"}]},
+        config={"configurable": {"thread_id": "thread-lifecycle-test"}},
+    )
+
+    assert res.get("artifact_ids") == [2]
+    art_probe = db_session.get(AnalysisArtifact, 1)
+    art_deliverable = db_session.get(AnalysisArtifact, 2)
+
+    assert art_probe is not None
+    assert art_deliverable is not None
+
+    # Probe was not cited -> superseded
+    assert art_probe.status == "superseded"
+    assert art_probe.expires_at is not None
+
+    # Deliverable was cited -> promoted to open and durable
+    assert art_deliverable.status == "open"
+    assert art_deliverable.expires_at is None
+
 
 
 

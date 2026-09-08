@@ -110,6 +110,36 @@ def test_coordinator_delegates_compare_to_analyst(
     assert analyst_final in (result["messages"][-1].content or "")
 
 
+def test_coordinator_delegates_list_transactions_to_analyst(
+    db_session: Session, agent_sessions
+) -> None:
+    seed_coffee(db_session)
+    analyst_final = "artifacts: [1]. Listed 25 transactions."
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "ask_analyst",
+                        "args": {"task": "List all transactions"},
+                        "id": "ask-list-1",
+                    }
+                ],
+            ),
+            AIMessage(content=f"Here are the transactions: {analyst_final}"),
+        ]
+    )
+    graph = _coordinator(model, analyst_model=_idle(analyst_final))
+    result = graph.invoke(
+        {"messages": [{"role": "user", "content": "list all the transactions"}]},
+        {"configurable": {"thread_id": "t3.1-list-tx"}, "recursion_limit": 25},
+    )
+    names = tool_names(result)
+    assert "ask_analyst" in names
+    assert analyst_final in (result["messages"][-1].content or "")
+
+
 def test_coordinator_delegates_cleanup_to_steward(
     db_session: Session, agent_sessions
 ) -> None:

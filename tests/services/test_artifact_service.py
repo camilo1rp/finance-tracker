@@ -80,6 +80,7 @@ def test_persist_materialize_and_derive_artifact(db_session: Session) -> None:
     assert artifact is not None
     assert artifact.kind == "group_summary"
     assert artifact.thread_id == "test-thread-1"
+    assert "groups" in artifact.digest
 
     # Materialize
     materialized = artifact_service.materialize_artifact(db_session, artifact)
@@ -95,6 +96,20 @@ def test_persist_materialize_and_derive_artifact(db_session: Session) -> None:
     assert derived.id != artifact_id
     assert derived.derived_from == artifact_id
     assert derived.spec["kwargs"]["group_by"] == "subcategory"
+
+    # Materialize non-tool cache
+    non_tool_art = AnalysisArtifact(
+        thread_id="test-thread-1",
+        kind="mapping_preview",
+        title="Preview",
+        spec={},
+        digest={"text": "Preview", "kind": "mapping_preview", "title": "Preview"},
+        cache={"scanned": 10},
+        status="open",
+        created_at=artifact.created_at,
+    )
+    materialized_cached = artifact_service.materialize_artifact(db_session, non_tool_art, limit=10)
+    assert materialized_cached == {"scanned": 10}
 
 
 def test_cleanup_expired_artifacts_and_proposals(db_session: Session) -> None:

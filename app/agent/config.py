@@ -264,15 +264,15 @@ def sqlite_file_checkpointer(path: str | None = None) -> Iterator[Any]:
 
 @contextmanager
 def open_checkpointer(*, in_memory: bool = False) -> Iterator[Any]:
-    if in_memory:
+    from app.config import settings
+
+    url = settings.database_url
+    if in_memory or url in ("sqlite:///:memory:", "sqlite://"):
         from langgraph.checkpoint.memory import InMemorySaver
 
         yield InMemorySaver()
         return
 
-    from app.config import settings
-
-    url = settings.database_url
     if url.startswith("postgresql"):
         from langgraph.checkpoint.postgres import PostgresSaver
 

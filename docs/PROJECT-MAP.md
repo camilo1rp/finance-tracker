@@ -12,17 +12,17 @@ Planning reference for `finance-tracker-skeleton`. Derived from source and tests
 | Enrichment range | **13** commits `265803b`…`28dd469` (enrichment A through live-run lessons), plus closeout `4769fa9` |
 | Python (venv, as of generation) | 3.14.5. **Studio requires ≥3.11 and &lt;3.14** — do not plan Studio against this venv; use Dockerfile 3.12 or a 3.11–3.13 venv. [D] Studio pin from LangGraph CLI docs / `langgraph.json` comment in prior map; Dockerfile is [C] `python:3.12-slim`. |
 | Dockerfile base | `python:3.12-slim` [C] |
-| Tests | **414 passed**, 2 deselected (`live_gmail`, `live_gmail_rest`) |
+| Tests | **421 passed**, 2 deselected (`live_gmail`, `live_gmail_rest`) |
 
 ### Reconciled counts
 
 | Item | Count | How derived |
 |---|---|---|
-| HTTP app endpoints | **32** | health 1 + accounts 2 + owners 2 + mappings 6 + imports 1 + transactions 4 + analytics 11 + artifacts 5. Excludes FastAPI `/docs`, `/redoc`, `/openapi.json`. [C] router tables §4 |
+| HTTP app endpoints | **37** | health 1 + accounts 2 + owners 2 + mappings 6 + imports 1 + transactions 4 + analytics 11 + artifacts 5 + agent 5. Excludes FastAPI `/docs`, `/redoc`, `/openapi.json`. [C] router tables §4 |
 | Tables | **10** | listed in §3. Smoke test asserts **5** of them (does not assert enrichment or `analysis_artifacts`) — see §12. [C]/[T] |
 | Agent tools | **26** | 15 in `read.py` (including `open_artifact`, `submit_analysis`) + 5 enricher + 3 steward + 3 subagent wrappers. Artifact-producing reads persist `analysis_artifacts` (not ledger writes). `submit_analysis` is graph-state finish. **0** apply tools. Same scheme as §8.3. [C] |
 | Graphs in `langgraph.json` | **4** | `coordinator`, `steward`, `analyst`, `enricher` [C] |
-| Tests collected | **414** + 2 deselected | `live_gmail`, `live_gmail_rest` [T] |
+| Tests collected | **421** + 2 deselected | `live_gmail`, `live_gmail_rest` [T] |
 | CLI flags (`python -m app.agent.cli`) | **12** flags + 1 positional | §10A. There is **no** `--add-sender`. [C] |
 | Env variable names | **31** | §10 (app-consumed + SDK-only). Names only; never values. [C] |
 | Invariants | **47** | `INV-01`…`INV-47` in §9 [C] |
@@ -647,6 +647,18 @@ All except `/unmapped` go through `_apply_filters` → **`date_to` defaults to t
 
 Proven: `tests/routers/test_artifacts.py`. [T]
 
+### 4.9 `app/routers/agent.py` (5)
+
+| Method | Path | Params | Body | Response | Status | Delegates | Quirks |
+|---|---|---|---|---|---|---|---|
+| POST | `/agent/chat` | — | `AgentChatIn` | `AgentTurnOut` | 200 | `coordinator_graph.ainvoke` | Serialized per `thread_id` lock. Watermarks artifacts to return those produced this turn. Returns interrupt payload with `{ops, preview, preview_artifact_id, rationale}` if paused. |
+| POST | `/agent/chat/stream` | — | `AgentChatIn` | SSE (`text/event-stream`) | 200 | `coordinator_graph.astream` | Emits `tool` (subagent progress), `artifact` (produced artifacts), `interrupt` (approval payload), `done` (turn completion with messages/artifacts), `error`. Terminated cleanly on interrupt. |
+| POST | `/agent/resume` | — | `AgentResumeIn` | `AgentTurnOut` | 200 | `coordinator_graph.ainvoke(Command(resume=...))` | Accepts `decision` (`approve` or `reject`) and optional `ops` subset (op objects). Resumes paused steward execution. |
+| GET | `/agent/thread/{thread_id}/state` | path `thread_id` | — | `AgentThreadStateOut` | 200 | `coordinator_graph.get_state` | Rehydrates transcript messages, pending interrupt payload, thread-scoped artifacts, and email source availability without running graph. |
+| GET | `/agent/email-source-status` | — | — | `EmailSourceStatusOut` | 200 | `get_email_status` | Returns provider, availability, account_hint, and detail without invoking graph. |
+
+Proven: `tests/routers/test_agent.py`. [T]
+
 ---
 
 ## 5. Schemas / DTOs
@@ -701,6 +713,14 @@ Field lists are **[C]** (read from the Pydantic classes). Behavioral notes that 
 | `ArtifactSummary` | `id`, `thread_id`, `kind`, `title`, `status`, `created_at`, `derived_from` | `GET /artifacts` |
 | `ArtifactOut` | summary fields + `run_id`, `produced_by`, `spec`, `digest`, `cache_as_of` | `GET /artifacts/{id}`, derive response |
 | `ArtifactDeriveIn` | `mutations: dict`, `title=None`, `thread_id=None` | `POST /artifacts/{id}/derive` |
+| `AgentChatIn` | `thread_id`, `message` | `POST /agent/chat`, `/chat/stream` |
+| `AgentResumeIn` | `thread_id`, `decision`, `ops=None` | `POST /agent/resume` |
+| `TurnArtifactOut` | `artifact_id`, `kind`, `title`, `digest` | turn and thread state responses |
+| `InterruptPayloadOut` | `ops`, `preview`, `preview_artifact_id=None`, `rationale=None` | turn and thread state responses |
+| `ChatMessageOut` | `role`, `content`, `id=None`, `name=None`, `tool_calls=None` | turn and thread state responses |
+| `AgentTurnOut` | `thread_id`, `messages`, `interrupted`, `interrupt=None`, `artifacts=[]` | `POST /agent/chat`, `/resume` |
+| `EmailSourceStatusOut` | `provider`, `available`, `account_hint=None`, `detail=None` | `GET /agent/email-source-status`, state |
+| `AgentThreadStateOut` | `thread_id`, `messages`, `interrupted`, `interrupt=None`, `artifacts=[]`, `email_source_status=None` | `GET /agent/thread/{id}/state` |
 
 **Discriminated union:** `MappingOp = Annotated[Union[CreateMappingOp, UpdateMappingOp, DeleteMappingOp, SetTransactionCategoryOp, RemoveTransactionOverrideOp], Field(discriminator="op")]`. Parser: `app/schemas.py::parse_mapping_op` (passthrough if already a model; else `TypeAdapter`). **No `rules` field and no alias** on `MappingPlanIn`.
 
@@ -1549,6 +1569,7 @@ You can answer closed data questions yourself: a total, cash flow, or a summary 
 Category and subcategory are independent labels on the same row and can overlap. A name may live on either axis — check both catalogs. Both filters AND; do not add those two summaries. Ambiguous which-label → ask_analyst. Subcategory is not a steward mapping kind.
 
 Stored categories, merchants, and types are not always correct or complete. If the question is open — insights, patterns, discovery, things that might be split or mislabeled, or inconsistencies — do not answer from a single catalog or total. Delegate to ask_analyst. If a catalog or summary is truncated, that is not a complete answer; tighten the query or delegate.
+Requests to list, show, find, or search individual transactions go to ask_analyst (the coordinator does not list raw transactions directly). Pass any resolved owner/account filters and date ranges in the task text.
 
 Answer "how much did I spend" with get_total. Type SPEND means purchases, not net spending. Lead with `spend` (purchases − refunds) and `net_cash_flow` (income + refunds − purchases − fees). Then mention purchases and refunds. Do not call the SPEND bucket "total spend". Transfers and adjustments are not spending or cash-flow net. sign_convention is import convention, not the sign of returned amounts. summarize, get_cash_flow, and analyst list wrappers use the same field meanings.
 Delegate anything touching mappings, unmapped values, or overrides to run_data_steward.
@@ -2314,7 +2335,29 @@ Moved from §12 "deliberately not covered" and extended. For each: what would be
 | `spike-output-rest.md` | REST spike redaction format | Owner review before bulk | Path 1 |
 | `GMAIL-SETUP.md` | Two paths; Testing-status 7-day refresh tokens; `gmail.readonly` only | Ops | §7A.2, §11B |
 | `README.md` | API + CLI + observability | Onboarding | may lag `STEWARD_MODEL` providers |
+| `docs/decision-records/001-authentication-decision-gate.md` | Option (A): Defer authentication; single-user local only | Avoid client-side security theater | Backend open locally; no mock login |
+| `docs/decision-records/002-agent-autonomy-inv01.md` | Preserve INV-01 strictly; reject autonomous mutations | Prevent unreviewed ledger mutations | Human approval interrupt required |
+| `docs/decision-records/003-multi-user-oauth-roadmap.md` | OAuth / SSO gated behind multi-user DB migration | Schema single-tenancy | Prerequisite multi-tenant backend |
 
 **Not covered here:** commit SHAs per DC (see git log `265803b`…`28dd469`).
 
 ---
+
+## 17. Frontend MVP Architecture & Contracts
+
+Built as a dark-mode-first Next.js 15 App Router client in `frontend/`.
+
+### 17.1 Architecture & Stack
+- **Framework:** Next.js 15 + React 19 + TypeScript + Tailwind CSS.
+- **Data Fetching:** TanStack Query v5 + Axios + Orval code generation (`npm run codegen`).
+- **Money Handling:** `Decimal.js` string-backed representation. Numeric(12,2) decimals are NEVER parsed through `parseFloat` or `Number()`.
+- **Testing:** Vitest + React Testing Library + MSW (`npm run test`). 17 regression tests verifying contract traps.
+
+### 17.2 Contract Traps & Invariant Protections
+1. **Explicit `date_to` (INV-26):** All query hooks and deep links explicitly populate `date_to` (defaulting to today's date when omitted) so client drill-downs never silently widen query windows.
+2. **Sentinel Sanitization:** `(unassigned)` category/subcategory sentinels are stripped before querying to prevent 422 `UnknownLabelFilterError`.
+3. **Double-Call Account Mapping Merge:** When querying account-scoped mappings, two parallel queries (`GET /mappings?account_id=` and `GET /mappings`) are fetched and merged so global rules (`account_id IS NULL`) are not lost.
+4. **Optimistic Updates Narrowed:** Optimistic cache updates are strictly restricted to `PATCH /transactions/{id}`. Rule applications, reclassifications, and imports are pessimistic.
+5. **GenUI Artifact Registry:** Artifacts are rendered via server-assigned `kind` matching the 7 models: `transaction_list`, `group_summary`, `total`, `value_list`, `mapping_preview`, `comparison`, `large_tool_output`, with safe fallback on unknown kinds.
+6. **Steward Approval Contract:** Rehydration restores pending interrupts directly from thread state; subset approvals submit 0-based op indices and full op objects matching server contracts.
+

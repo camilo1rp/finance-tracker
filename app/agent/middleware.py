@@ -248,6 +248,8 @@ class ArtifactOffloadMiddleware(AgentMiddleware):
                 spec={"tool": tool_name, "kwargs": tool_args},
                 result={"raw": content_str},
                 produced_by="analyst",
+                status="ephemeral",
+                expires_in_seconds=86400,
             )
 
         new_content = (

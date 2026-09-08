@@ -125,18 +125,35 @@ def slice_artifact_payload(
     return payload
 
 
-def _extract_runtime_meta(runtime: ToolRuntime | None) -> tuple[str, str | None]:
+def _extract_runtime_meta(runtime: ToolRuntime | None) -> tuple[str, str | None, str]:
     thread_id = "standalone"
     run_id = None
+    agent_name = "unknown"
     if runtime and hasattr(runtime, "config") and isinstance(runtime.config, dict):
         cfg = runtime.config
         run_id = cfg.get("run_id")
         configurable = cfg.get("configurable")
-        if isinstance(configurable, dict) and configurable.get("thread_id"):
-            thread_id = str(configurable["thread_id"])
-        elif cfg.get("metadata") and isinstance(cfg["metadata"], dict) and cfg["metadata"].get("thread_id"):
-            thread_id = str(cfg["metadata"]["thread_id"])
-    return thread_id, run_id
+        if isinstance(configurable, dict):
+            if configurable.get("thread_id"):
+                thread_id = str(configurable["thread_id"])
+            if configurable.get("agent_name"):
+                agent_name = str(configurable["agent_name"])
+        meta = cfg.get("metadata")
+        if isinstance(meta, dict):
+            if meta.get("thread_id") and thread_id == "standalone":
+                thread_id = str(meta["thread_id"])
+            if meta.get("lc_agent_name"):
+                agent_name = str(meta["lc_agent_name"])
+            elif meta.get("agent_name"):
+                agent_name = str(meta["agent_name"])
+    return thread_id, run_id, agent_name
+
+
+def _artifact_lifecycle_params(agent_name: str) -> tuple[str, int | None, str]:
+    if agent_name == "analyst":
+        return "provisional", 3600, "analyst"
+    produced_by = agent_name if agent_name != "unknown" else "analyst"
+    return "open", None, produced_by
 
 
 def _emit_artifact_ui_event(
@@ -199,7 +216,8 @@ def list_values(
     """
     if err := _limit_error(limit):
         return err, None
-    thread_id, run_id = _extract_runtime_meta(runtime)
+    thread_id, run_id, agent_name = _extract_runtime_meta(runtime)
+    status, expires_in_seconds, produced_by = _artifact_lifecycle_params(agent_name)
     with tool_session() as db:
         payload = analytics_service.list_values(
             db,
@@ -231,7 +249,9 @@ def list_values(
             title=f"Values: {dimension}",
             spec=spec,
             result=payload,
-            produced_by="analyst",
+            produced_by=produced_by,
+            status=status,
+            expires_in_seconds=expires_in_seconds,
         )
         _emit_artifact_ui_event(art_id, "value_list", "grouped_table", digest)
         return digest, {"artifact_id": art_id, "kind": "value_list", "component": "grouped_table"}
@@ -284,7 +304,8 @@ def list_transactions(
     """
     if err := _limit_error(limit):
         return err, None
-    thread_id, run_id = _extract_runtime_meta(runtime)
+    thread_id, run_id, agent_name = _extract_runtime_meta(runtime)
+    status, expires_in_seconds, produced_by = _artifact_lifecycle_params(agent_name)
     with tool_session() as db:
         try:
             payload = analytics_service.list_transactions(
@@ -321,7 +342,9 @@ def list_transactions(
             title="Transaction list",
             spec=spec,
             result=payload,
-            produced_by="analyst",
+            produced_by=produced_by,
+            status=status,
+            expires_in_seconds=expires_in_seconds,
         )
         _emit_artifact_ui_event(art_id, "transaction_list", "transaction_list", digest)
         return digest, {"artifact_id": art_id, "kind": "transaction_list", "component": "transaction_list"}
@@ -361,7 +384,8 @@ def search_transactions_tool(
     """
     if err := _limit_error(limit):
         return err, None
-    thread_id, run_id = _extract_runtime_meta(runtime)
+    thread_id, run_id, agent_name = _extract_runtime_meta(runtime)
+    status, expires_in_seconds, produced_by = _artifact_lifecycle_params(agent_name)
     with tool_session() as db:
         try:
             payload = analytics_service.search_transactions(
@@ -400,7 +424,9 @@ def search_transactions_tool(
             title=f"Search: {query}",
             spec=spec,
             result=payload,
-            produced_by="analyst",
+            produced_by=produced_by,
+            status=status,
+            expires_in_seconds=expires_in_seconds,
         )
         _emit_artifact_ui_event(art_id, "transaction_list", "transaction_list", digest)
         return digest, {"artifact_id": art_id, "kind": "transaction_list", "component": "transaction_list"}
@@ -430,7 +456,8 @@ def summarize(
     """
     if err := _optional_limit_error(limit):
         return err, None
-    thread_id, run_id = _extract_runtime_meta(runtime)
+    thread_id, run_id, agent_name = _extract_runtime_meta(runtime)
+    status, expires_in_seconds, produced_by = _artifact_lifecycle_params(agent_name)
     with tool_session() as db:
         try:
             payload = analytics_service.summarize(
@@ -472,7 +499,9 @@ def summarize(
             title=f"Summary by {group_by}",
             spec=spec,
             result=payload,
-            produced_by="analyst",
+            produced_by=produced_by,
+            status=status,
+            expires_in_seconds=expires_in_seconds,
         )
         _emit_artifact_ui_event(art_id, "group_summary", comp, digest)
         return digest, {"artifact_id": art_id, "kind": "group_summary", "component": comp}
@@ -502,7 +531,8 @@ def get_total(
     date_to defaults to today. merchant is exact unless it contains `%`.
     Amounts are positive magnitudes except net_cash_flow, which can be negative.
     """
-    thread_id, run_id = _extract_runtime_meta(runtime)
+    thread_id, run_id, agent_name = _extract_runtime_meta(runtime)
+    status, expires_in_seconds, produced_by = _artifact_lifecycle_params(agent_name)
     with tool_session() as db:
         try:
             row = analytics_service.get_total(
@@ -539,7 +569,9 @@ def get_total(
             title="Totals breakdown",
             spec=spec,
             result=row,
-            produced_by="analyst",
+            produced_by=produced_by,
+            status=status,
+            expires_in_seconds=expires_in_seconds,
         )
         _emit_artifact_ui_event(art_id, "total", "kpi_row", digest)
         return digest, {"artifact_id": art_id, "kind": "total", "component": "kpi_row"}
@@ -566,7 +598,8 @@ def top_merchants(
     """
     if err := _limit_error(limit):
         return err, None
-    thread_id, run_id = _extract_runtime_meta(runtime)
+    thread_id, run_id, agent_name = _extract_runtime_meta(runtime)
+    status, expires_in_seconds, produced_by = _artifact_lifecycle_params(agent_name)
     with tool_session() as db:
         try:
             rows = analytics_service.top_merchants(
@@ -605,7 +638,9 @@ def top_merchants(
             title="Top merchants",
             spec=spec,
             result={"merchants": rows, "match_count": len(rows), "returned": len(rows), "truncated": False},
-            produced_by="analyst",
+            produced_by=produced_by,
+            status=status,
+            expires_in_seconds=expires_in_seconds,
         )
         _emit_artifact_ui_event(art_id, "group_summary", "bar", digest)
         return digest, {"artifact_id": art_id, "kind": "group_summary", "component": "bar"}
@@ -633,7 +668,8 @@ def largest_transactions(
     """
     if err := _limit_error(limit):
         return err, None
-    thread_id, run_id = _extract_runtime_meta(runtime)
+    thread_id, run_id, agent_name = _extract_runtime_meta(runtime)
+    status, expires_in_seconds, produced_by = _artifact_lifecycle_params(agent_name)
     with tool_session() as db:
         try:
             payload = analytics_service.largest_transactions(
@@ -672,7 +708,9 @@ def largest_transactions(
             title="Largest transactions",
             spec=spec,
             result=payload,
-            produced_by="analyst",
+            produced_by=produced_by,
+            status=status,
+            expires_in_seconds=expires_in_seconds,
         )
         _emit_artifact_ui_event(art_id, "transaction_list", "transaction_list", digest)
         return digest, {"artifact_id": art_id, "kind": "transaction_list", "component": "transaction_list"}
@@ -698,7 +736,8 @@ def get_cash_flow(
     overridden — prefer account_id for a single-account view.
     merchant is exact unless it contains `%`.
     """
-    thread_id, run_id = _extract_runtime_meta(runtime)
+    thread_id, run_id, agent_name = _extract_runtime_meta(runtime)
+    status, expires_in_seconds, produced_by = _artifact_lifecycle_params(agent_name)
     with tool_session() as db:
         try:
             row = analytics_service.cash_flow(
@@ -733,7 +772,9 @@ def get_cash_flow(
             title="Cash flow summary",
             spec=spec,
             result=row,
-            produced_by="analyst",
+            produced_by=produced_by,
+            status=status,
+            expires_in_seconds=expires_in_seconds,
         )
         _emit_artifact_ui_event(art_id, "total", "kpi_row", digest)
         return digest, {"artifact_id": art_id, "kind": "total", "component": "kpi_row"}
@@ -782,6 +823,15 @@ def submit_analysis(
     Takes a list of referenced artifact_ids and a concise narrative summary (<= 600 characters).
     This is the analyst's only finish.
     """
+    thread_id, run_id, _ = _extract_runtime_meta(runtime)
+    with tool_session() as db:
+        artifact_service.promote_cited_artifacts(
+            db,
+            thread_id=thread_id,
+            cited_ids=artifact_ids,
+            run_id=run_id,
+        )
+
     ids_str = ", ".join(str(i) for i in artifact_ids)
     summary_text = f"artifacts: [{ids_str}]. {narrative}".strip()
     return Command(

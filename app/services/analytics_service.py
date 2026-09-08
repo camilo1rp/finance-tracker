@@ -469,6 +469,35 @@ def top_merchants(
     ]
 
 
+def _parse_sort_order(sort: str | None, default_order: list[Any]) -> list[Any]:
+    if not sort or not sort.strip():
+        return default_order
+
+    descending = False
+    col_str = sort.strip()
+    if col_str.startswith("-"):
+        descending = True
+        col_str = col_str[1:]
+    elif ":" in col_str:
+        parts = col_str.split(":", 1)
+        col_str = parts[0].strip()
+        descending = parts[1].strip().lower() == "desc"
+
+    col_map = {
+        "date": Transaction.transaction_date,
+        "transaction_date": Transaction.transaction_date,
+        "amount": Transaction.amount,
+        "description": Transaction.description,
+        "id": Transaction.id,
+    }
+    if col_str in col_map:
+        c = col_map[col_str]
+        order = c.desc() if descending else c.asc()
+        return [order, Transaction.id.asc()]
+
+    return default_order
+
+
 def largest_transactions(
     db: Session,
     date_from: date | None,
@@ -476,6 +505,7 @@ def largest_transactions(
     account_id: int | None,
     owner_id: int | None,
     limit: int = 10,
+    offset: int = 0,
     merchant: str | None = None,
     transaction_type: str | None = None,
     category: str | None = None,
@@ -495,7 +525,10 @@ def largest_transactions(
         label_filters=label_filters,
     )
     match_count = _count_rows(db, stmt)
-    stmt = stmt.order_by(func.abs(Transaction.amount).desc(), Transaction.id).limit(limit)
+    stmt = stmt.order_by(func.abs(Transaction.amount).desc(), Transaction.id)
+    if offset:
+        stmt = stmt.offset(offset)
+    stmt = stmt.limit(limit)
     transactions = list(db.scalars(stmt).all())
 
     by_type = _totals_by_type(
@@ -525,6 +558,8 @@ def search_transactions(
     owner_id: int | None,
     query: str,
     limit: int = 50,
+    offset: int = 0,
+    sort: str | None = None,
     merchant: str | None = None,
     category: str | None = None,
     subcategory: str | None = None,
@@ -544,7 +579,11 @@ def search_transactions(
     )
     stmt = stmt.where(text_query_clause(query))
     match_count = _count_rows(db, stmt)
-    stmt = stmt.order_by(Transaction.transaction_date, Transaction.id).limit(limit)
+    order_clause = _parse_sort_order(sort, [Transaction.transaction_date.asc(), Transaction.id.asc()])
+    stmt = stmt.order_by(*order_clause)
+    if offset:
+        stmt = stmt.offset(offset)
+    stmt = stmt.limit(limit)
     transactions = list(db.scalars(stmt).all())
 
     by_type = _totals_by_type(
@@ -586,6 +625,8 @@ def list_transactions(
     category: str | None = None,
     subcategory: str | None = None,
     limit: int = 25,
+    offset: int = 0,
+    sort: str | None = None,
 ) -> dict[str, Any]:
     """List rows. Does not default date_to. Cards only — use get for triples."""
     label_filters = _resolve_optional_label_filters(db, category, subcategory)
@@ -602,7 +643,11 @@ def list_transactions(
         default_date_to=False,
     )
     match_count = _count_rows(db, stmt)
-    stmt = stmt.order_by(Transaction.transaction_date, Transaction.id).limit(limit)
+    order_clause = _parse_sort_order(sort, [Transaction.transaction_date.asc(), Transaction.id.asc()])
+    stmt = stmt.order_by(*order_clause)
+    if offset:
+        stmt = stmt.offset(offset)
+    stmt = stmt.limit(limit)
     rows = list(db.scalars(stmt).all())
     cards = [transaction_card(txn) for txn in rows]
     return {"transactions": cards, **page_meta(match_count, len(cards))}

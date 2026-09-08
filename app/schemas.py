@@ -424,3 +424,65 @@ class ArtifactDeriveIn(BaseModel):
     title: str | None = None
     thread_id: str | None = None
 
+
+# ---- Agent Router Schemas ----
+
+class AgentChatIn(BaseModel):
+    thread_id: str
+    message: str
+
+
+class AgentResumeIn(BaseModel):
+    thread_id: str
+    decision: str
+    ops: Optional[list[dict[str, Any]]] = None
+
+
+class TurnArtifactOut(BaseModel):
+    artifact_id: int
+    kind: str
+    title: str
+    digest: Any
+    spec: Optional[Any] = None
+    data: Optional[Any] = None
+
+
+class InterruptPayloadOut(BaseModel):
+    ops: list[dict[str, Any]]
+    preview: dict[str, Any]
+    preview_artifact_id: Optional[int] = None
+    rationale: Optional[str] = None
+
+
+class ChatMessageOut(BaseModel):
+    role: str
+    content: Any
+    id: Optional[str] = None
+    name: Optional[str] = None
+    tool_calls: Optional[list[dict[str, Any]]] = None
+
+
+class AgentTurnOut(BaseModel):
+    thread_id: str
+    messages: list[ChatMessageOut]
+    interrupted: bool
+    interrupt: Optional[InterruptPayloadOut] = None
+    artifacts: list[TurnArtifactOut] = []
+
+
+class EmailSourceStatusOut(BaseModel):
+    provider: str
+    available: bool
+    account_hint: Optional[str] = None
+    detail: Optional[str] = None
+
+
+class AgentThreadStateOut(BaseModel):
+    thread_id: str
+    messages: list[ChatMessageOut]
+    interrupted: bool
+    interrupt: Optional[InterruptPayloadOut] = None
+    artifacts: list[TurnArtifactOut] = []
+    email_source_status: Optional[EmailSourceStatusOut] = None
+
+

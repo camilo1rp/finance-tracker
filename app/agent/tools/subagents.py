@@ -65,10 +65,11 @@ def make_subagent_tools(*, analyst, steward, enricher):
     @tool(
         "ask_analyst",
         description=(
-            "Delegate insights and discovery: comparisons, trends, patterns, and "
-            "anything that may be mislabeled or split across names. Include date "
+            "Delegate transaction listings, searches, insights, and discovery: "
+            "list or show transactions, searches, comparisons, trends, patterns, "
+            "and anything that may be mislabeled or split across names. Include date "
             "ranges, owner/account ids, and whether refunds count. Use this when "
-            "the question is open, not only as a last resort."
+            "the question is open or asks to see transactions, not only as a last resort."
         ),
     )
     def ask_analyst(task: str, runtime: ToolRuntime) -> str:
